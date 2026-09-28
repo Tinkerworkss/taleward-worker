@@ -34,3 +34,8 @@ packages = ["taleward_worker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# PyInstaller mit selbst gebautem Startprogramm (bootloader): Das vorgefertigte aus dem Wheel teilen sich viele
+# fremde Programme, darunter Schadsoftware – Virenscanner schlagen deshalb bei ihm oft falsch an.
+no-binary-package = ["pyinstaller"]
