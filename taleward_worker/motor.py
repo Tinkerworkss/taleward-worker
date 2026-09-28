@@ -130,6 +130,11 @@ class Installation:
                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
                     "UV_PYTHON_PREFERENCE": "only-managed",
                     "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "copy"})
+        if getattr(self, "_ohne_verknuepfung", False):
+            # Python liegt dann „außerhalb“ von uv: uv soll den Python-Ordner mit der blockierten Verknüpfung
+            # nicht mehr ansehen (sonst os error 448 bei jeder Abfrage des Interpreters)
+            env["UV_PYTHON_INSTALL_DIR"] = str(pfade.basis() / "python-ohne-uv")
+            env["UV_PYTHON_PREFERENCE"] = "managed"
         env.pop("VIRTUAL_ENV", None)
         return env
 
@@ -247,6 +252,8 @@ class Installation:
             if e.code == "abgebrochen" or not verknuepfung_verboten(e.text):
                 raise
             self.zeilen.append("Hinweis: Windows erlaubt die Python-Verknüpfung nicht – nutze Python direkt.")
+            verknuepfungen_entfernen(ordner)
+            self._ohne_verknuepfung = True
         gefunden = python_finden(ordner)
         if gefunden is None:
             raise MotorFehler("installation", "\n".join(self.zeilen[-12:]) + "\nPython 3.11 nicht gefunden.")
@@ -255,6 +262,25 @@ class Installation:
 
 def verknuepfung_verboten(text: str) -> bool:
     return "os error 448" in text or "minor version link" in text
+
+
+def verknuepfungen_entfernen(ordner: Path) -> None:
+    """Die (blockierte) Verknüpfung „cpython-3.11-…“ entfernen – nur die Verknüpfung, nie das Ziel."""
+    for d in ordner.glob("cpython-3.11-*"):
+        try:
+            if d.is_symlink():
+                d.unlink()
+            elif getattr(d, "is_junction", lambda: False)() or (sys.platform == "win32" and _ist_umleitung(d)):
+                os.rmdir(d)   # entfernt bei einer Junction nur die Verknüpfung selbst
+        except OSError:
+            pass
+
+
+def _ist_umleitung(d: Path) -> bool:
+    try:
+        return bool(os.lstat(d).st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+    except (OSError, AttributeError):
+        return False
 
 
 def python_finden(ordner: Path) -> Path | None:

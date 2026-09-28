@@ -229,7 +229,7 @@ def test_python_verknuepfung_verboten(tmp_path, monkeypatch):
         exe = d / "python.exe" if sys.platform == "win32" else d / "bin" / "python3.11"
         exe.parent.mkdir(parents=True)
         exe.write_text("")
-    (ordner / "cpython-3.11-x").mkdir()  # die (kaputte) Verknüpfung selbst zählt nicht
+    (ordner / "cpython-3.11-x").symlink_to(ordner / "cpython-3.11.16-x")  # die Verknüpfung zählt nicht
 
     inst = motor.Installation.__new__(motor.Installation)
     inst.zeilen = []
@@ -238,8 +238,10 @@ def test_python_verknuepfung_verboten(tmp_path, monkeypatch):
         raise motor.MotorFehler("installation", "error: Failed to create Python minor version link directory\n"
                                 "  cause: ... (os error 448)")
     inst._uv = uv_scheitert
-    assert inst._python_einrichten().parent.name in ("cpython-3.11.16-x", "bin")
     assert "cpython-3.11.16-x" in str(inst._python_einrichten())
+    # Verknüpfung weg, Ziel noch da; weitere uv-Aufrufe sehen den Python-Ordner nicht mehr
+    assert not (ordner / "cpython-3.11-x").exists() and (ordner / "cpython-3.11.16-x").is_dir()
+    assert inst._umgebung()["UV_PYTHON_INSTALL_DIR"] != str(ordner)
 
     def uv_anders(*_a, **_k):
         raise motor.MotorFehler("netz", "dns error")
