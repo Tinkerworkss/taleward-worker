@@ -1,0 +1,159 @@
+From bfabc29d43ba13707c79c8c1c1a32866def1edf3 Mon Sep 17 00:00:00 2001
+From: Taleward <twartanddesign@gmail.com>
+Date: Tue, 29 Sep 2026 00:20:57 +0200
+Subject: [PATCH] =?UTF-8?q?KI-Paket:=20Gr=C3=B6=C3=9Fenangaben=20nach=20Me?=
+ =?UTF-8?q?ssung=20(Windows=207,7=20GB),=20Installation=20ohne=20zweites?=
+ =?UTF-8?q?=20Exemplar?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fortschritt und Texte rechnen mit der installierten Größe statt einer geschätzten Downloadgröße.
+uv verlinkt die Dateien aus dem Zwischenspeicher (hardlink) statt sie zu kopieren – das spart während
+der Installation etwa 8 GB. Platzbedarf auf 16 GB angehoben, veralteter Text „mindestens 6 GB“ entfernt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ README.md                   |  4 ++--
+ taleward_worker/hardware.py |  2 +-
+ taleward_worker/motor.py    |  6 ++++--
+ taleward_worker/ui/app.js   |  4 ++--
+ taleward_worker/ui/texte.js | 12 ++++++------
+ 5 files changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/README.md b/README.md
+index 74d9a7f..85e8df7 100644
+--- a/README.md
++++ b/README.md
+@@ -8,7 +8,7 @@ freigegeben werden.
+ 
+ - **Einrichtung in vier Schritten:** Adresse des Servers und Kopplungscode eingeben (aus der Verwaltung:
+   Transkription → Weiteren Worker anbinden). Die App prüft dann Grafikkarte, Treiber und Speicherplatz und lädt das
+-  KI-Paket, einmalig etwa 4 GB. Beim ersten Auftrag kommen die Sprachmodelle dazu (etwa 5 GB).
++  KI-Paket, einmalig, es belegt etwa 8 GB. Beim ersten Auftrag kommen die Sprachmodelle dazu (etwa 5 GB).
+ - **Immer passend zum Server:** Die App installiert das KI-Paket in genau der Fassung des Servers (Git-Tag
+   `v<Fassung>`). Nach einem Server-Update zieht sie selbst nach.
+ - **Updates über den eigenen Server:** Die App fragt nur ihren Taleward-Server nach einer neuen Fassung, nie GitHub.
+@@ -37,7 +37,7 @@ herunterladen und starten. Administratorrechte sind nicht nötig. Voraussetzunge
+ - Windows 10 (ab 1809) oder 11
+ - am besten eine NVIDIA-Grafikkarte (ab 2 GB, gut ab 6 GB) mit aktuellem Treiber (ab 525), sonst arbeitet der Prozessor
+ - mindestens 8 GB Arbeitsspeicher
+-- etwa 14 GB freier Speicher
++- etwa 16 GB freier Speicher (KI-Paket etwa 8 GB, Sprachmodelle etwa 5 GB)
+ 
+ Die App liegt unter `%LOCALAPPDATA%\Programs\Taleward Worker`. KI-Paket, Modelle, Einstellungen und Protokoll liegen
+ unter `%LOCALAPPDATA%\Taleward Worker`. Beim Deinstallieren wirst du gefragt, ob diese Daten auch weg sollen.
+diff --git a/taleward_worker/hardware.py b/taleward_worker/hardware.py
+index adad455..c99c93f 100644
+--- a/taleward_worker/hardware.py
++++ b/taleward_worker/hardware.py
+@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
+ from taleward_worker import pfade
+ 
+ MIN_TREIBER = 525      # CUDA 12 (ältere Treiber: PyTorch sieht die Karte nicht)
+-PLATZ_KI_GB = 14       # KI-Paket (~6 GB) + Modelle (~5 GB) + Luft für Aufnahmen
++PLATZ_KI_GB = 16       # KI-Paket (~8 GB) + Modelle (~5 GB) + Luft für Aufnahmen
+ 
+ 
+ @dataclass
+diff --git a/taleward_worker/motor.py b/taleward_worker/motor.py
+index c73f0f7..efc0a2c 100644
+--- a/taleward_worker/motor.py
++++ b/taleward_worker/motor.py
+@@ -27,7 +27,9 @@ import httpx
+ from taleward_worker import REPO, VERSION, pfade
+ 
+ # Ungefähre Downloadgröße (für die Fortschrittsanzeige; gemessen an der Größe des Zwischenspeichers)
+-ERWARTET_MB = {"windows": 3600, "linux": 5200, "cpu": 1300, "test": 60}
++# Größe des installierten KI-Pakets in MB (gemessen: Windows mit CUDA 7,7 GB, Stand 0.4.4). Der Fortschritt zählt,
++# wie weit der Zwischenspeicher von uv gewachsen ist – dort liegen die Pakete entpackt, also in dieser Größe.
++ERWARTET_MB = {"windows": 7900, "linux": 8500, "cpu": 1800, "test": 60}
+ 
+ 
+ class MotorFehler(Exception):
+@@ -129,7 +131,7 @@ class Installation:
+         env.update({"UV_CACHE_DIR": str(pfade.basis() / "cache"),
+                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
+                     "UV_PYTHON_PREFERENCE": "only-managed",
+-                    "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "copy"})
++                    "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "hardlink"})  # kein zweites Exemplar: spart während der Installation ~8 GB
+         if getattr(self, "_ohne_verknuepfung", False):
+             # Python liegt dann „außerhalb“ von uv: uv soll den Python-Ordner mit der blockierten Verknüpfung
+             # nicht mehr ansehen (sonst os error 448 bei jeder Abfrage des Interpreters)
+diff --git a/taleward_worker/ui/app.js b/taleward_worker/ui/app.js
+index 5f2b589..da03209 100644
+--- a/taleward_worker/ui/app.js
++++ b/taleward_worker/ui/app.js
+@@ -176,8 +176,8 @@
+     const inst = S.installation;
+     const test = testmodus();
+     $("#installieren-text").textContent = test ? t("installieren_text_test")
+-      : prozessorWahl ? t("installieren_text_cpu", { mb: gb(1300) })
+-      : t("installieren_text_windows", { mb: gb(S.system === "windows" ? 3600 : 5200) });
++      : prozessorWahl ? t("installieren_text_cpu", { mb: gb(1800) })
++      : t("installieren_text_windows", { mb: gb(S.system === "windows" ? 7900 : 8500) });
+     const laeuft = inst && !["fertig", "fehler", "abgebrochen"].includes(inst.phase);
+     const fehler = inst && ["fehler", "abgebrochen"].includes(inst.phase);
+     $("#inst-start").hidden = laeuft || fehler;
+diff --git a/taleward_worker/ui/texte.js b/taleward_worker/ui/texte.js
+index e3a7d48..0a3990a 100644
+--- a/taleward_worker/ui/texte.js
++++ b/taleward_worker/ui/texte.js
+@@ -24,7 +24,7 @@ window.TEXTE = {
+     pr_ram: "Arbeitsspeicher", pr_ram_text: "{gb} GB", pr_ram_wenig: "{gb} GB – empfohlen sind mindestens {min} GB.",
+     pr_arbeitsweise: "Arbeitsweise",
+     pr_cpu_angebot: "Der Worker kann mit dem Prozessor arbeiten. Das dauert deutlich länger – eine 4-Stunden-Aufnahme etwa 4 bis 10 Stunden –, läuft aber gut über Nacht. Zum reinen Ausprobieren gibt es den Testmodus.",
+-    installieren_text_cpu: "Einmalig etwa {mb} herunterladen (Fassung für den Prozessor, ohne Grafikkarten-Bibliotheken).",
++    installieren_text_cpu: "Das KI-Paket wird einmalig geladen und belegt etwa {mb} (Fassung für den Prozessor, ohne Grafikkarten-Bibliotheken).",
+     intro_verbinden: "Dieser PC übernimmt für deinen Taleward-Server die Transkription der Aufnahmen. Sie werden hier verarbeitet und danach gelöscht – nichts bleibt auf diesem PC liegen.",
+     hilfe_code: "In der Verwaltung des Servers: Transkription → Weiteren Worker anbinden → Kopplungscode erzeugen. Der Code gilt 15 Minuten.",
+     hilfe_name: "So erscheint dieser PC in der Verwaltung.",
+@@ -32,7 +32,7 @@ window.TEXTE = {
+     inst_punkt_1: "Python und die KI-Bibliotheken (WhisperX, PyTorch für deine Grafikkarte)",
+     inst_punkt_2: "Den Taleward-Worker in genau der Fassung deines Servers",
+     inst_punkt_3: "Später beim ersten Auftrag: die Sprachmodelle (einmalig etwa 5 GB)",
+-    installieren_text_windows: "Einmalig etwa {mb} herunterladen. Je nach Internet dauert das 10 bis 30 Minuten – du kannst den PC in der Zeit normal nutzen.",
++    installieren_text_windows: "Das KI-Paket wird einmalig geladen und belegt etwa {mb}. Je nach Internet dauert das 10 bis 30 Minuten – du kannst den PC in der Zeit normal nutzen.",
+     installieren_text_test: "Im Testmodus reichen ein paar MB: Der Worker schreibt Platzhaltertext statt einer echten Transkription.",
+     fertig_text: "Der Worker holt sich ab jetzt selbst neue Aufnahmen vom Server. Du musst nichts weiter tun.",
+     autostart_titel: "Mit dem Computer starten",
+@@ -61,7 +61,7 @@ window.TEXTE = {
+     neuer_versuch_in: "in {s} s", gleich: "gleich",
+     laufzeit: "seit {min} min",
+     // Prüfung
+-    pr_gpu: "Grafikkarte", pr_gpu_keine: "Keine NVIDIA-Grafikkarte gefunden. Der Worker braucht eine NVIDIA-Karte mit mindestens 6 GB Grafikspeicher.",
++    pr_gpu: "Grafikkarte",
+     pr_treiber: "Treiber", pr_treiber_alt: "Treiber {v} ist zu alt – bitte mindestens {min} installieren (NVIDIA-App oder nvidia.com).",
+     pr_platz: "Speicherplatz", pr_platz_text: "{frei} GB frei, gebraucht werden etwa {noetig} GB.",
+     pr_modell: "Sprachmodell", pr_modell_text: "{modell} – passend für {vram} Grafikspeicher.",
+@@ -138,7 +138,7 @@ window.TEXTE = {
+     pr_ram: "Memory (RAM)", pr_ram_text: "{gb} GB", pr_ram_wenig: "{gb} GB – at least {min} GB recommended.",
+     pr_arbeitsweise: "How it works",
+     pr_cpu_angebot: "The worker can run on the processor. That takes considerably longer – about 4 to 10 hours for a 4-hour recording – but works well overnight. For just trying things out there is test mode.",
+-    installieren_text_cpu: "About {mb} to download, once (processor version, without graphics card libraries).",
++    installieren_text_cpu: "The AI package is downloaded once and takes about {mb} (processor version, without graphics card libraries).",
+     "Mit dem Prozessor einrichten": "Set up with the processor", "Testmodus": "Test mode", "Arbeitsweise": "How it works", "Gemessen": "Last measured",
+     intro_verbinden: "This PC transcribes recordings for your Taleward server. They are processed here and deleted afterwards – nothing stays on this PC.",
+     hilfe_code: "In the server's admin: Transcription → Connect another worker → Create pairing code. The code is valid for 15 minutes.",
+@@ -147,7 +147,7 @@ window.TEXTE = {
+     inst_punkt_1: "Python and the AI libraries (WhisperX, PyTorch for your graphics card)",
+     inst_punkt_2: "The Taleward worker in exactly your server's version",
+     inst_punkt_3: "Later, on the first job: the speech models (about 5 GB, once)",
+-    installieren_text_windows: "About {mb} to download, once. Depending on your connection this takes 10 to 30 minutes – you can keep using the PC meanwhile.",
++    installieren_text_windows: "The AI package is downloaded once and takes about {mb}. Depending on your connection this takes 10 to 30 minutes – you can keep using the PC meanwhile.",
+     installieren_text_test: "Test mode needs only a few MB: the worker writes placeholder text instead of a real transcript.",
+     fertig_text: "From now on the worker fetches new recordings from the server by itself. Nothing else to do.",
+     autostart_titel: "Start with the computer", autostart_text: "Starts invisibly in the background when you sign in.",
+@@ -170,7 +170,7 @@ window.TEXTE = {
+     st_update: "Updating AI package", st_update_text: "The server now runs version {fassung}. The worker is downloading the matching version ({prozent}) and switches over by itself.",
+     app_update: "New version of the worker app: {version}.",
+     neuer_versuch_in: "in {s} s", gleich: "shortly", laufzeit: "for {min} min",
+-    pr_gpu: "Graphics card", pr_gpu_keine: "No NVIDIA graphics card found. The worker needs an NVIDIA card with at least 6 GB of graphics memory.",
++    pr_gpu: "Graphics card",
+     pr_treiber: "Driver", pr_treiber_alt: "Driver {v} is too old – please install at least {min} (NVIDIA app or nvidia.com).",
+     pr_platz: "Disk space", pr_platz_text: "{frei} GB free, about {noetig} GB needed.",
+     pr_modell: "Speech model", pr_modell_text: "{modell} – suits {vram} of graphics memory.",
+-- 
+2.43.0
+
