@@ -1,0 +1,141 @@
+From b734f563ad9677c770160d1cee878b35b75425ed Mon Sep 17 00:00:00 2001
+From: Taleward <twartanddesign@gmail.com>
+Date: Mon, 28 Sep 2026 23:46:39 +0200
+Subject: [PATCH] =?UTF-8?q?KI-Paket:=20Python=20auch=20dort=20einrichten,?=
+ =?UTF-8?q?=20wo=20Windows=20die=20uv-Verkn=C3=BCpfung=20verbietet=20(os?=
+ =?UTF-8?q?=20error=20448)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+uv python install legt eine Junction cpython-3.11-… an; auf manchen Windows-PCs (z. B. mit OneDrive
+„Dateien bei Bedarf“) scheitert das. Python ist dann trotzdem vollständig da – die App nimmt es direkt
+und erstellt die Umgebung mit dem genauen Pfad. Fortschrittsbalken zählt jetzt auch beim Python-Download.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ taleward_worker/motor.py | 45 ++++++++++++++++++++++++++++++++++++----
+ tests/test_worker_app.py | 35 +++++++++++++++++++++++++++++++
+ 2 files changed, 76 insertions(+), 4 deletions(-)
+
+diff --git a/taleward_worker/motor.py b/taleward_worker/motor.py
+index 44aa1e7..e82e92b 100644
+--- a/taleward_worker/motor.py
++++ b/taleward_worker/motor.py
+@@ -133,12 +133,13 @@ class Installation:
+         env.pop("VIRTUAL_ENV", None)
+         return env
+ 
+-    def _uv(self, *argumente: str, anteil_von: float, anteil_bis: float, erwartet_mb: int = 0) -> None:
++    def _uv(self, *argumente: str, anteil_von: float, anteil_bis: float, erwartet_mb: int = 0,
++            messordner: Path | None = None) -> None:
+         if self._abbrechen.is_set():
+             raise MotorFehler("abgebrochen")
+         befehl = [uv_programm(), *argumente]
+         self.zeilen.append("$ uv " + " ".join(argumente))
+-        cache = pfade.basis() / "cache"
++        cache = messordner or pfade.basis() / "cache"   # dessen Wachstum zeigt den Fortschritt
+         start_mb = pfade.ordnergroesse(cache) // 2 ** 20 if cache.exists() else 0
+         self._prozess = subprocess.Popen(befehl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                          encoding="utf-8", errors="replace", env=self._umgebung(),
+@@ -178,8 +179,8 @@ class Installation:
+         shutil.rmtree(neu, ignore_errors=True)
+ 
+         self.phase = "python"
+-        self._uv("python", "install", "3.11", anteil_von=0.0, anteil_bis=0.05, erwartet_mb=30)
+-        self._uv("venv", str(neu), "--python", "3.11", anteil_von=0.05, anteil_bis=0.06)
++        basis_python = self._python_einrichten()
++        self._uv("venv", str(neu), "--python", str(basis_python), anteil_von=0.05, anteil_bis=0.06)
+         py = str(neu / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
+ 
+         self.phase = "pakete"
+@@ -231,6 +232,42 @@ class Installation:
+              "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
+ 
+ 
++    def _python_einrichten(self) -> Path:
++        """Python 3.11 über uv holen und den Pfad zur python(.exe) liefern.
++
++        uv legt zusätzlich eine Verknüpfung „cpython-3.11-…“ an (unter Windows eine Junction). Manche Windows-PCs
++        verbieten das (os error 448, „nicht vertrauenswürdiger Bereitstellungspunkt“, z. B. mit OneDrive „Dateien
++        bei Bedarf“). Python selbst ist dann trotzdem vollständig da – wir nehmen es direkt, ohne die Verknüpfung.
++        """
++        ordner = pfade.basis() / "python"
++        try:
++            self._uv("python", "install", "3.11", "--no-bin", "--no-registry", anteil_von=0.0, anteil_bis=0.05, erwartet_mb=110,
++                     messordner=ordner)
++        except MotorFehler as e:
++            if e.code == "abgebrochen" or not verknuepfung_verboten(e.text):
++                raise
++            self.zeilen.append("Hinweis: Windows erlaubt die Python-Verknüpfung nicht – nutze Python direkt.")
++        gefunden = python_finden(ordner)
++        if gefunden is None:
++            raise MotorFehler("installation", "\n".join(self.zeilen[-12:]) + "\nPython 3.11 nicht gefunden.")
++        return gefunden
++
++
++def verknuepfung_verboten(text: str) -> bool:
++    return "os error 448" in text or "minor version link" in text
++
++
++def python_finden(ordner: Path) -> Path | None:
++    """Neueste von uv installierte Python-3.11-Fassung (nicht die Verknüpfung „cpython-3.11-…“)."""
++    kandidaten = []
++    for d in ordner.glob("cpython-3.11.*"):
++        exe = d / "python.exe" if sys.platform == "win32" else d / "bin" / "python3.11"
++        teile = d.name.split("-")[1].split(".")
++        if exe.is_file() and len(teile) == 3 and teile[2].isdigit():
++            kandidaten.append((int(teile[2]), exe))
++    return max(kandidaten)[1] if kandidaten else None
++
++
+ # Pakete, die es im PyTorch-Verzeichnis nicht für jedes System gibt (torchcodec cu128: nur Linux). Sie kommen von
+ # PyPI in der gewöhnlichen Fassung – Taleward übergibt Audio im Speicher, torchcodec dekodiert nichts.
+ OHNE_TORCH_VERZEICHNIS = ("torchcodec",)
+diff --git a/tests/test_worker_app.py b/tests/test_worker_app.py
+index 0ec33ef..03dab87 100644
+--- a/tests/test_worker_app.py
++++ b/tests/test_worker_app.py
+@@ -214,3 +214,38 @@ def test_anforderungen_aufteilen():
+     assert extra.strip() == "torchcodec==0.7.0"
+     b2, e2 = motor.anforderungen_aufteilen("torch==2.8.0\n")
+     assert e2 == "" and b2 == "torch==2.8.0\n"
++
++
++def test_python_verknuepfung_verboten(tmp_path, monkeypatch):
++    """Windows mit OneDrive & Co.: uv darf die Verknüpfung cpython-3.11-… nicht anlegen (os error 448)."""
++    import sys
++
++    from taleward_worker import motor, pfade
++
++    monkeypatch.setattr(pfade, "basis", lambda: tmp_path)
++    ordner = tmp_path / "python"
++    for name in ("cpython-3.11.9-x", "cpython-3.11.16-x"):
++        d = ordner / name
++        exe = d / "python.exe" if sys.platform == "win32" else d / "bin" / "python3.11"
++        exe.parent.mkdir(parents=True)
++        exe.write_text("")
++    (ordner / "cpython-3.11-x").mkdir()  # die (kaputte) Verknüpfung selbst zählt nicht
++
++    inst = motor.Installation.__new__(motor.Installation)
++    inst.zeilen = []
++
++    def uv_scheitert(*_a, **_k):
++        raise motor.MotorFehler("installation", "error: Failed to create Python minor version link directory\n"
++                                "  cause: ... (os error 448)")
++    inst._uv = uv_scheitert
++    assert inst._python_einrichten().parent.name in ("cpython-3.11.16-x", "bin")
++    assert "cpython-3.11.16-x" in str(inst._python_einrichten())
++
++    def uv_anders(*_a, **_k):
++        raise motor.MotorFehler("netz", "dns error")
++    inst._uv = uv_anders
++    try:
++        inst._python_einrichten()
++        raise AssertionError("anderer Fehler muss durchgereicht werden")
++    except motor.MotorFehler as e:
++        assert e.code == "netz"
+-- 
+2.43.0
+
