@@ -1,0 +1,66 @@
+From 634c4effcdb005545788b222165439639595fe59 Mon Sep 17 00:00:00 2001
+From: Taleward <twartanddesign@gmail.com>
+Date: Tue, 29 Sep 2026 00:00:16 +0200
+Subject: [PATCH] Windows: weniger Fehlalarme von Virenscannern
+
+PyInstaller-Startprogramm selbst bauen statt das vorgefertigte (das viele fremde Programme teilen) und der
+TalewardWorker.exe Dateiangaben (Hersteller, Produkt, Fassung) mitgeben.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ packaging/taleward-worker.spec | 25 ++++++++++++++++++++++++-
+ pyproject.toml                 |  5 +++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/packaging/taleward-worker.spec b/packaging/taleward-worker.spec
+index 18683cc..d6663d0 100644
+--- a/packaging/taleward-worker.spec
++++ b/packaging/taleward-worker.spec
+@@ -19,6 +19,29 @@ versteckt = collect_submodules("pystray") + ["webview.platforms.winforms", "webv
+ a = Analysis([str(wurzel / "taleward_worker" / "__main__.py")], pathex=[str(wurzel)], datas=daten,
+              hiddenimports=versteckt, excludes=["tkinter", "matplotlib", "numpy"], noarchive=False)
+ pyz = PYZ(a.pure)
++
++# Windows: Angaben zur Datei (Hersteller, Produkt, Fassung) – ohne sie wirkt eine .exe für Virenscanner verdächtiger
++versionsinfo = None
++if windows:
++    import re
++    from PyInstaller.utils.win32.versioninfo import (FixedFileInfo, StringFileInfo, StringStruct, StringTable,
++                                                     VarFileInfo, VarStruct, VSVersionInfo)
++    text = (wurzel / "taleward_worker" / "__init__.py").read_text(encoding="utf-8")
++    fassung = re.search(r'^VERSION = "([0-9.]+)"', text, re.M).group(1)
++    zahlen = tuple((list(map(int, fassung.split("."))) + [0, 0, 0, 0])[:4])
++    versionsinfo = VSVersionInfo(
++        ffi=FixedFileInfo(filevers=zahlen, prodvers=zahlen),
++        kids=[StringFileInfo([StringTable("040704B0", [
++            StringStruct("CompanyName", "Taleward"),
++            StringStruct("FileDescription", "Taleward Worker"),
++            StringStruct("FileVersion", fassung),
++            StringStruct("InternalName", "TalewardWorker"),
++            StringStruct("LegalCopyright", "AGPL-3.0 – https://github.com/Tinkerworkss/taleward-worker"),
++            StringStruct("OriginalFilename", "TalewardWorker.exe"),
++            StringStruct("ProductName", "Taleward Worker"),
++            StringStruct("ProductVersion", fassung)])]),
++              VarFileInfo([VarStruct("Translation", [0x0407, 1200])])])
++
+ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="TalewardWorker", console=False,
+-          icon=str(wurzel / "packaging" / "windows" / "taleward-worker.ico"), upx=False)
++          icon=str(wurzel / "packaging" / "windows" / "taleward-worker.ico"), upx=False, version=versionsinfo)
+ COLLECT(exe, a.binaries, a.datas, name="TalewardWorker", upx=False)
+diff --git a/pyproject.toml b/pyproject.toml
+index d2de72a..eba0971 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,3 +34,8 @@ packages = ["taleward_worker"]
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
++
++[tool.uv]
++# PyInstaller mit selbst gebautem Startprogramm (bootloader): Das vorgefertigte aus dem Wheel teilen sich viele
++# fremde Programme, darunter Schadsoftware – Virenscanner schlagen deshalb bei ihm oft falsch an.
++no-binary-package = ["pyinstaller"]
+-- 
+2.43.0
+
