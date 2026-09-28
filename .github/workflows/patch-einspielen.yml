@@ -1,0 +1,37 @@
+name: Patch einspielen
+# Lädt man eine *.patch-Datei ins Hauptverzeichnis hoch, spielt dieser Ablauf sie ein,
+# prüft mit den Tests und schiebt das Ergebnis auf main. Die Patch-Datei selbst wird wieder entfernt.
+on:
+  push:
+    branches: [main]
+    paths: ["*.patch"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  einspielen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch anwenden
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! ls *.patch >/dev/null 2>&1; then echo "Keine Patch-Datei – nichts zu tun."; exit 0; fi
+          mkdir -p /tmp/patches
+          cp *.patch /tmp/patches/
+          git rm -q *.patch
+          git commit -q -m "Patch-Datei entfernt"
+          git am --committer-date-is-author-date /tmp/patches/*.patch
+      - uses: astral-sh/setup-uv@v6
+      - name: Tests
+        run: |
+          if [ ! -f pyproject.toml ]; then echo "Noch kein Code – Tests übersprungen."; exit 0; fi
+          uv sync && uv run pytest -q
+          shellcheck install-linux.sh packaging/pruefe-ki-paket.sh
+      - name: Hochladen
+        run: git push
