@@ -31,7 +31,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 RestartApplications=no
 MinVersion=10.0.17763
-LicenseFile=..\..\..\LICENSE
+LicenseFile=..\..\LICENSE
 
 [Languages]
 Name: "de"; MessagesFile: "compiler:Languages\German.isl"
