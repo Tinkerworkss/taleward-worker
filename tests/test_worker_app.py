@@ -214,3 +214,38 @@ def test_anforderungen_aufteilen():
     assert extra.strip() == "torchcodec==0.7.0"
     b2, e2 = motor.anforderungen_aufteilen("torch==2.8.0\n")
     assert e2 == "" and b2 == "torch==2.8.0\n"
+
+
+def test_python_verknuepfung_verboten(tmp_path, monkeypatch):
+    """Windows mit OneDrive & Co.: uv darf die Verknüpfung cpython-3.11-… nicht anlegen (os error 448)."""
+    import sys
+
+    from taleward_worker import motor, pfade
+
+    monkeypatch.setattr(pfade, "basis", lambda: tmp_path)
+    ordner = tmp_path / "python"
+    for name in ("cpython-3.11.9-x", "cpython-3.11.16-x"):
+        d = ordner / name
+        exe = d / "python.exe" if sys.platform == "win32" else d / "bin" / "python3.11"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("")
+    (ordner / "cpython-3.11-x").mkdir()  # die (kaputte) Verknüpfung selbst zählt nicht
+
+    inst = motor.Installation.__new__(motor.Installation)
+    inst.zeilen = []
+
+    def uv_scheitert(*_a, **_k):
+        raise motor.MotorFehler("installation", "error: Failed to create Python minor version link directory\n"
+                                "  cause: ... (os error 448)")
+    inst._uv = uv_scheitert
+    assert inst._python_einrichten().parent.name in ("cpython-3.11.16-x", "bin")
+    assert "cpython-3.11.16-x" in str(inst._python_einrichten())
+
+    def uv_anders(*_a, **_k):
+        raise motor.MotorFehler("netz", "dns error")
+    inst._uv = uv_anders
+    try:
+        inst._python_einrichten()
+        raise AssertionError("anderer Fehler muss durchgereicht werden")
+    except motor.MotorFehler as e:
+        assert e.code == "netz"

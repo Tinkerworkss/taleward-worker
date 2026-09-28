@@ -133,12 +133,13 @@ class Installation:
         env.pop("VIRTUAL_ENV", None)
         return env
 
-    def _uv(self, *argumente: str, anteil_von: float, anteil_bis: float, erwartet_mb: int = 0) -> None:
+    def _uv(self, *argumente: str, anteil_von: float, anteil_bis: float, erwartet_mb: int = 0,
+            messordner: Path | None = None) -> None:
         if self._abbrechen.is_set():
             raise MotorFehler("abgebrochen")
         befehl = [uv_programm(), *argumente]
         self.zeilen.append("$ uv " + " ".join(argumente))
-        cache = pfade.basis() / "cache"
+        cache = messordner or pfade.basis() / "cache"   # dessen Wachstum zeigt den Fortschritt
         start_mb = pfade.ordnergroesse(cache) // 2 ** 20 if cache.exists() else 0
         self._prozess = subprocess.Popen(befehl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                          encoding="utf-8", errors="replace", env=self._umgebung(),
@@ -178,8 +179,8 @@ class Installation:
         shutil.rmtree(neu, ignore_errors=True)
 
         self.phase = "python"
-        self._uv("python", "install", "3.11", anteil_von=0.0, anteil_bis=0.05, erwartet_mb=30)
-        self._uv("venv", str(neu), "--python", "3.11", anteil_von=0.05, anteil_bis=0.06)
+        basis_python = self._python_einrichten()
+        self._uv("venv", str(neu), "--python", str(basis_python), anteil_von=0.05, anteil_bis=0.06)
         py = str(neu / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
 
         self.phase = "pakete"
@@ -229,6 +230,42 @@ class Installation:
         (alt / "taleward-motor.json").write_text(json.dumps(
             {"fassung": self.fassung, "ref": q["ref"], "testmodus": self.testmodus, "backend": self.backend,
              "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
+
+
+    def _python_einrichten(self) -> Path:
+        """Python 3.11 über uv holen und den Pfad zur python(.exe) liefern.
+
+        uv legt zusätzlich eine Verknüpfung „cpython-3.11-…“ an (unter Windows eine Junction). Manche Windows-PCs
+        verbieten das (os error 448, „nicht vertrauenswürdiger Bereitstellungspunkt“, z. B. mit OneDrive „Dateien
+        bei Bedarf“). Python selbst ist dann trotzdem vollständig da – wir nehmen es direkt, ohne die Verknüpfung.
+        """
+        ordner = pfade.basis() / "python"
+        try:
+            self._uv("python", "install", "3.11", "--no-bin", "--no-registry", anteil_von=0.0, anteil_bis=0.05, erwartet_mb=110,
+                     messordner=ordner)
+        except MotorFehler as e:
+            if e.code == "abgebrochen" or not verknuepfung_verboten(e.text):
+                raise
+            self.zeilen.append("Hinweis: Windows erlaubt die Python-Verknüpfung nicht – nutze Python direkt.")
+        gefunden = python_finden(ordner)
+        if gefunden is None:
+            raise MotorFehler("installation", "\n".join(self.zeilen[-12:]) + "\nPython 3.11 nicht gefunden.")
+        return gefunden
+
+
+def verknuepfung_verboten(text: str) -> bool:
+    return "os error 448" in text or "minor version link" in text
+
+
+def python_finden(ordner: Path) -> Path | None:
+    """Neueste von uv installierte Python-3.11-Fassung (nicht die Verknüpfung „cpython-3.11-…“)."""
+    kandidaten = []
+    for d in ordner.glob("cpython-3.11.*"):
+        exe = d / "python.exe" if sys.platform == "win32" else d / "bin" / "python3.11"
+        teile = d.name.split("-")[1].split(".")
+        if exe.is_file() and len(teile) == 3 and teile[2].isdigit():
+            kandidaten.append((int(teile[2]), exe))
+    return max(kandidaten)[1] if kandidaten else None
 
 
 # Pakete, die es im PyTorch-Verzeichnis nicht für jedes System gibt (torchcodec cu128: nur Linux). Sie kommen von
