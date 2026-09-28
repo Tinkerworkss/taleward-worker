@@ -27,7 +27,9 @@ import httpx
 from taleward_worker import REPO, VERSION, pfade
 
 # Ungefähre Downloadgröße (für die Fortschrittsanzeige; gemessen an der Größe des Zwischenspeichers)
-ERWARTET_MB = {"windows": 3600, "linux": 5200, "cpu": 1300, "test": 60}
+# Größe des installierten KI-Pakets in MB (gemessen: Windows mit CUDA 7,7 GB, Stand 0.4.4). Der Fortschritt zählt,
+# wie weit der Zwischenspeicher von uv gewachsen ist – dort liegen die Pakete entpackt, also in dieser Größe.
+ERWARTET_MB = {"windows": 7900, "linux": 8500, "cpu": 1800, "test": 60}
 
 
 class MotorFehler(Exception):
@@ -129,7 +131,7 @@ class Installation:
         env.update({"UV_CACHE_DIR": str(pfade.basis() / "cache"),
                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
                     "UV_PYTHON_PREFERENCE": "only-managed",
-                    "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "copy"})
+                    "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "hardlink"})  # kein zweites Exemplar: spart während der Installation ~8 GB
         if getattr(self, "_ohne_verknuepfung", False):
             # Python liegt dann „außerhalb“ von uv: uv soll den Python-Ordner mit der blockierten Verknüpfung
             # nicht mehr ansehen (sonst os error 448 bei jeder Abfrage des Interpreters)

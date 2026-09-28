@@ -8,7 +8,7 @@ freigegeben werden.
 
 - **Einrichtung in vier Schritten:** Adresse des Servers und Kopplungscode eingeben (aus der Verwaltung:
   Transkription → Weiteren Worker anbinden). Die App prüft dann Grafikkarte, Treiber und Speicherplatz und lädt das
-  KI-Paket, einmalig etwa 4 GB. Beim ersten Auftrag kommen die Sprachmodelle dazu (etwa 5 GB).
+  KI-Paket, einmalig, es belegt etwa 8 GB. Beim ersten Auftrag kommen die Sprachmodelle dazu (etwa 5 GB).
 - **Immer passend zum Server:** Die App installiert das KI-Paket in genau der Fassung des Servers (Git-Tag
   `v<Fassung>`). Nach einem Server-Update zieht sie selbst nach.
 - **Updates über den eigenen Server:** Die App fragt nur ihren Taleward-Server nach einer neuen Fassung, nie GitHub.
@@ -37,7 +37,7 @@ herunterladen und starten. Administratorrechte sind nicht nötig. Voraussetzunge
 - Windows 10 (ab 1809) oder 11
 - am besten eine NVIDIA-Grafikkarte (ab 2 GB, gut ab 6 GB) mit aktuellem Treiber (ab 525), sonst arbeitet der Prozessor
 - mindestens 8 GB Arbeitsspeicher
-- etwa 14 GB freier Speicher
+- etwa 16 GB freier Speicher (KI-Paket etwa 8 GB, Sprachmodelle etwa 5 GB)
 
 Die App liegt unter `%LOCALAPPDATA%\Programs\Taleward Worker`. KI-Paket, Modelle, Einstellungen und Protokoll liegen
 unter `%LOCALAPPDATA%\Taleward Worker`. Beim Deinstallieren wirst du gefragt, ob diese Daten auch weg sollen.

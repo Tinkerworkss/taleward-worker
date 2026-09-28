@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from taleward_worker import pfade
 
 MIN_TREIBER = 525      # CUDA 12 (ältere Treiber: PyTorch sieht die Karte nicht)
-PLATZ_KI_GB = 14       # KI-Paket (~6 GB) + Modelle (~5 GB) + Luft für Aufnahmen
+PLATZ_KI_GB = 16       # KI-Paket (~8 GB) + Modelle (~5 GB) + Luft für Aufnahmen
 
 
 @dataclass

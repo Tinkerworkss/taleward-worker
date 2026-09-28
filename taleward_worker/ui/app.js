@@ -176,8 +176,8 @@
     const inst = S.installation;
     const test = testmodus();
     $("#installieren-text").textContent = test ? t("installieren_text_test")
-      : prozessorWahl ? t("installieren_text_cpu", { mb: gb(1300) })
-      : t("installieren_text_windows", { mb: gb(S.system === "windows" ? 3600 : 5200) });
+      : prozessorWahl ? t("installieren_text_cpu", { mb: gb(1800) })
+      : t("installieren_text_windows", { mb: gb(S.system === "windows" ? 7900 : 8500) });
     const laeuft = inst && !["fertig", "fehler", "abgebrochen"].includes(inst.phase);
     const fehler = inst && ["fehler", "abgebrochen"].includes(inst.phase);
     $("#inst-start").hidden = laeuft || fehler;
