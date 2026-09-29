@@ -1,0 +1,165 @@
+From 6695d82efd2bf0604a4c6ce1e15efc46ec5e1fb1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 29 Sep 2026 22:42:20 +0200
+Subject: [PATCH] Pause auf dem Server in der App anzeigen
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pausiert die Verwaltung des Servers diesen Worker, meldet das der Worker
+(ab Server 0.4.14). Die App zeigt dann „Auf dem Server pausiert“ mit Hinweis,
+wo man fortsetzt; die eigene Pause geht vor. Protokollzeile bei jeder Änderung.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ taleward_worker/dienst.py      | 21 +++++++++++++++++++--
+ taleward_worker/oberflaeche.py |  1 +
+ taleward_worker/symbole.py     |  1 +
+ taleward_worker/ui/app.js      |  2 +-
+ taleward_worker/ui/texte.js    |  2 ++
+ tests/test_worker_app.py       | 12 ++++++++++++
+ 6 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/taleward_worker/dienst.py b/taleward_worker/dienst.py
+index f591f3d..58b5da1 100644
+--- a/taleward_worker/dienst.py
++++ b/taleward_worker/dienst.py
+@@ -128,6 +128,7 @@ class Dienst:
+         self._neustart_offen = False  # Einstellung geändert: nach dem laufenden Auftrag neu starten
+         self.zustand: dict = {"art": "gestoppt"}
+         self.info: dict = {}
++        self.server_pausiert = False  # in der Verwaltung des Servers pausiert (vom Worker gemeldet)
+         self._waechter = threading.Thread(target=self._wachen, daemon=True, name="dienst-waechter")
+         self._waechter.start()
+ 
+@@ -320,7 +321,7 @@ class Dienst:
+             if self._neustart_offen:
+                 self._neustart_offen = False
+                 threading.Thread(target=self.neu_starten, daemon=True).start()
+-            self._setzen("pausiert" if self.e.pausiert else "warte")
++            self._setzen(self._ruhezustand())
+         elif art == "auftrag":
+             self.wach.an()
+             self._setzen("arbeitet", jobId=e.get("jobId"), typ=e.get("typ"), p=0.0)
+@@ -344,13 +345,29 @@ class Dienst:
+                 self._setzen("pausiert")
+         elif art == "fortgesetzt":
+             if self.zustand["art"] == "pausiert":
+-                self._setzen("warte")
++                self._setzen(self._ruhezustand())
++        elif art == "server_pausiert":  # in der Verwaltung des Servers pausiert
++            self.server_pausiert = True
++            self.protokoll.schreiben("In der Verwaltung des Servers pausiert")
++            if self.zustand["art"] in ("warte", "getrennt"):
++                self._setzen("server_pausiert")
++        elif art == "server_fortgesetzt":
++            self.server_pausiert = False
++            self.protokoll.schreiben("In der Verwaltung des Servers fortgesetzt")
++            if self.zustand["art"] == "server_pausiert":
++                self._setzen(self._ruhezustand())
+         elif art == "abgelehnt":
+             self._setzen("abgelehnt")
+         elif art == "fehler":
+             self._setzen("fehler", code="einrichtung", text=e.get("message", ""))
+             self.protokoll.schreiben(f"Fehler: {e.get('message')}")
+ 
++    def _ruhezustand(self) -> str:
++        """Zustand ohne Auftrag: eigene Pause vor der des Servers, sonst bereit."""
++        if self.e.pausiert:
++            return "pausiert"
++        return "server_pausiert" if self.server_pausiert else "warte"
++
+     def fuer_oberflaeche(self) -> dict:
+         return {"zustand": self.zustand, "info": self.info, "statistik": self.statistik.fuer_oberflaeche(),
+                 "laeuft": self.laeuft(), "pausiert": self.e.pausiert, "neustartOffen": self._neustart_offen}
+diff --git a/taleward_worker/oberflaeche.py b/taleward_worker/oberflaeche.py
+index 32c4e1d..332c6a6 100644
+--- a/taleward_worker/oberflaeche.py
++++ b/taleward_worker/oberflaeche.py
+@@ -488,6 +488,7 @@ def tray_titel(d: dict, sprache: str) -> str:
+         "warte": ("Bereit – wartet auf Aufnahmen", "Ready – waiting for recordings"),
+         "arbeitet": (f"Arbeitet … {round((z.get('p') or 0) * 100)} %", f"Working … {round((z.get('p') or 0) * 100)}%"),
+         "pausiert": ("Pausiert", "Paused"),
++        "server_pausiert": ("Auf dem Server pausiert", "Paused on the server"),
+         "getrennt": ("Keine Verbindung zum Server", "No connection to the server"),
+         "startet": ("Startet …", "Starting …"),
+         "fehler": ("Braucht deine Hilfe", "Needs your attention"),
+diff --git a/taleward_worker/symbole.py b/taleward_worker/symbole.py
+index 2118159..4e86441 100644
+--- a/taleward_worker/symbole.py
++++ b/taleward_worker/symbole.py
+@@ -13,6 +13,7 @@ FARBEN = {
+     "startet": "#c49235",
+     "abgestuerzt": "#c49235",
+     "pausiert": "#8A7654",
++    "server_pausiert": "#8A7654",
+     "gestoppt": "#8A7654",
+     "getrennt": "#9e2a3a",   # Siegel: braucht Aufmerksamkeit
+     "fehler": "#9e2a3a",
+diff --git a/taleward_worker/ui/app.js b/taleward_worker/ui/app.js
+index ed6aa5a..86481cd 100644
+--- a/taleward_worker/ui/app.js
++++ b/taleward_worker/ui/app.js
+@@ -277,7 +277,7 @@
+   function knoepfe(art) {
+     const ziel = $("#status-knoepfe");
+     const liste = [];
+-    if (["warte", "arbeitet", "getrennt", "startet"].includes(art)) liste.push(["Pausieren", "secondary", () => api.pausieren(true)]);
++    if (["warte", "arbeitet", "getrennt", "startet", "server_pausiert"].includes(art)) liste.push(["Pausieren", "secondary", () => api.pausieren(true)]);
+     if (art === "pausiert") liste.push(["Fortsetzen", "primary", () => api.pausieren(false)]);
+     if (art === "gestoppt") liste.push(["Starten", "primary", () => api.starten()]);
+     if (art === "fehler" || art === "abgestuerzt") {
+diff --git a/taleward_worker/ui/texte.js b/taleward_worker/ui/texte.js
+index 1810813..310d799 100644
+--- a/taleward_worker/ui/texte.js
++++ b/taleward_worker/ui/texte.js
+@@ -58,6 +58,7 @@ window.TEXTE = {
+     st_arbeitet: "Arbeitet", st_transcribe: "Transkription einer Aufnahme", st_voice_enroll: "Stimmprofil wird angelernt",
+     st_summarize: "Zusammenfassung mit lokalem Sprachmodell", st_document: "Unterlage wird ausgewertet",
+     st_pausiert: "Pausiert", st_pausiert_text: "Nimmt keine neuen Aufnahmen an. Aufträge warten auf dem Server.",
++    st_server_pausiert: "Auf dem Server pausiert", st_server_pausiert_text: "Die Verwaltung von {server} gibt diesem Worker gerade keine Aufträge. Fortsetzen geht dort unter Transkription.",
+     st_startet: "Startet …", st_startet_text: "Grafikkarte und Modelle werden geprüft.",
+     st_modelle_text: "Sprachmodelle werden vorbereitet – beim ersten Start einmalig etwa 5 GB. Bisher {mb}.",
+     st_getrennt: "Keine Verbindung", st_getrennt_text: "Der Server ist gerade nicht erreichbar. Neuer Versuch {wann}.",
+@@ -178,6 +179,7 @@ window.TEXTE = {
+     st_arbeitet: "Working", st_transcribe: "Transcribing a recording", st_voice_enroll: "Learning a voice profile",
+     st_summarize: "Summary with local language model", st_document: "Analysing a document",
+     st_pausiert: "Paused", st_pausiert_text: "Not accepting new recordings. Jobs wait on the server.",
++    st_server_pausiert: "Paused on the server", st_server_pausiert_text: "The administration of {server} is not giving this worker any jobs right now. Resume it there under Transcription.",
+     st_startet: "Starting …", st_startet_text: "Checking graphics card and models.",
+     st_modelle_text: "Preparing speech models – about 5 GB on first start, once. So far {mb}.",
+     st_getrennt: "No connection", st_getrennt_text: "The server can't be reached right now. Next try {wann}.",
+diff --git a/tests/test_worker_app.py b/tests/test_worker_app.py
+index 303fb27..18b4005 100644
+--- a/tests/test_worker_app.py
++++ b/tests/test_worker_app.py
+@@ -99,6 +99,8 @@ for zeile in sys.stdin:
+     b = zeile.strip()
+     if b == "pause": m("pausiert")
+     elif b == "weiter": m("fortgesetzt")
++    elif b == "server-pause": m("server_pausiert")
++    elif b == "server-weiter": m("server_fortgesetzt")
+     elif b == "stopp": break
+ m("beendet")
+ '''
+@@ -127,6 +129,16 @@ def test_dienst_verarbeitet_ereignisse(tmp_path):
+     assert _warten(lambda: d.zustand["art"] == "pausiert")
+     d.pausieren(False)
+     assert _warten(lambda: d.zustand["art"] == "warte")
++    # In der Verwaltung pausiert (der Schein-Motor spielt die Meldung des Servers nach)
++    d._senden("server-pause")
++    assert _warten(lambda: d.zustand["art"] == "server_pausiert")
++    d.pausieren(True)  # eigene Pause geht vor
++    assert _warten(lambda: d.zustand["art"] == "pausiert")
++    d.pausieren(False)
++    assert _warten(lambda: d.zustand["art"] == "server_pausiert")
++    d._senden("server-weiter")
++    assert _warten(lambda: d.zustand["art"] == "warte")
++    assert any("In der Verwaltung des Servers pausiert" in z for z in d.protokoll.zeilen)
+     d.stoppen()
+     assert d.zustand["art"] == "gestoppt" and not d.laeuft()
+ 
+-- 
+2.43.0
+
