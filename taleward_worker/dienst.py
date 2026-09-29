@@ -207,6 +207,8 @@ class Dienst:
             "DATA_DIR": str(pfade.basis() / "motor-daten"),
             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+            # Modelle kommen per HTTP; ohne Symlinks (Windows) nur etwas mehr Platz – keine Warnungen ins Protokoll
+            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1", "HF_HUB_DISABLE_XET": "1",
             "PATH": str(pfade.werkzeuge()) + os.pathsep + env.get("PATH", ""),
             # Recaps mit Ollama: eigenes/vorhandenes Ollama oder bewusst keins (sonst fände der Worker ein fremdes)
             "WORKER_LLM_URL": self._ollama_adresse(),

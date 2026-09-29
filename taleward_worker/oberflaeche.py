@@ -290,32 +290,39 @@ class WorkerApp:
                                                vor_tausch=vor, nach_tausch=nach)
         self.installation.starten()
 
+    def _motor_pruefen(self, erster: bool) -> None:
+        """Serverfassung abfragen; passt das KI-Paket nicht mehr, im Hintergrund nachziehen (nur ohne Auftrag)."""
+        self.fassung_abfragen()
+        if not self.e.gekoppelt:
+            return
+        if self.motor_passt():
+            if erster and not self.dienst.laeuft():
+                self.dienst.starten()
+        elif motor.installiert() or os.environ.get("TALEWARD_MOTOR"):
+            # Neue Serverfassung: Motor im Hintergrund aktualisieren (alter läuft bis zum Tausch weiter)
+            if erster and not self.dienst.laeuft():
+                self.dienst.starten()
+            laeuft_installation = self.installation and self.installation.phase not in ("fertig", "fehler",
+                                                                                         "abgebrochen")
+            if self.dienst.zustand.get("art") != "arbeitet" and not laeuft_installation:
+                self.installieren(self.e.testmodus)
+
     def _hintergrund_pflege(self) -> None:
-        """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 6 Stunden."""
+        """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 5 Minuten die
+        Serverfassung (ein kleiner Abruf – so zieht das KI-Paket kurz nach einem Server-Update nach) und alle
+        6 Stunden, ob es eine neue App gibt."""
         naechste_app_pruefung = 0.0
         erster = True
         while not self._beendet.is_set():
-            self.fassung_abfragen()
-            if self.e.gekoppelt:
-                if self.motor_passt():
-                    if erster and not self.dienst.laeuft():
-                        self.dienst.starten()
-                elif motor.installiert() or os.environ.get("TALEWARD_MOTOR"):
-                    # Neue Serverfassung: Motor im Hintergrund aktualisieren (alter läuft bis zum Tausch weiter)
-                    if erster and not self.dienst.laeuft():
-                        self.dienst.starten()
-                    if self.dienst.zustand.get("art") != "arbeitet":
-                        self.installieren(self.e.testmodus)
+            self._motor_pruefen(erster)
             if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
                 self.app_update_pruefen()
                 naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE
             erster = False
             self.tray_aktualisieren()
-            # Alle 5 Minuten schauen, ob ein anstehendes App-Update jetzt installiert werden kann
-            for _ in range(UPDATE_PRUEFEN_ALLE // 300):
-                if self._beendet.wait(300):
-                    return
-                self.app_update_wenn_frei()
+            if self._beendet.wait(300):
+                return
+            self.app_update_wenn_frei()
 
     # ------------------------------------------------------------------ Selbst-Update der App
     def app_update_pruefen(self) -> None:
