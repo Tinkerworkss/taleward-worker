@@ -177,8 +177,11 @@ class Api:
 
     def protokoll(self) -> list[str]:
         z = list(self._app.dienst.protokoll.zeilen)
-        if self._app.installation:
-            z += ["", "— Installation —", *self._app.installation.zeilen[-200:]]
+        inst = self._app.installation
+        # Die Ausgabe der Installation nur, solange sie läuft oder wenn sie gescheitert ist – sonst stünde sie für
+        # immer unter dem Protokoll des Workers, und dessen neue Zeilen wären nicht mehr unten zu sehen
+        if inst and inst.phase != "fertig":
+            z += ["", "— Installation —", *inst.zeilen[-200:]]
         return z[-800:]
 
     def ordner_oeffnen(self) -> None:

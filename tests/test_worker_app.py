@@ -263,3 +263,39 @@ def test_python_verknuepfung_verboten(tmp_path, monkeypatch):
         raise AssertionError("anderer Fehler muss durchgereicht werden")
     except motor.MotorFehler as e:
         assert e.code == "netz"
+
+
+def test_neue_serverfassung_tauscht_nur_den_code(eigener_ordner, monkeypatch):
+    """Gleiche KI-Bibliotheken: kein neues 8-GB-Paket, nur der Taleward-Code wird getauscht."""
+    import subprocess as sp
+
+    py = pfade.motor_python()
+    py.parent.mkdir(parents=True, exist_ok=True)
+    py.write_text("")
+    (pfade.motor() / "taleward-motor.json").write_text(json.dumps({"fassung": "0.4.13", "backend": "cuda"}))
+    monkeypatch.setattr(motor, "quelle", lambda f: {"ref": f"v{f}", "genau": True, "paket": "paket.zip",
+                                                    "anforderungen": "egal"})
+    monkeypatch.setattr(motor, "anforderungen_lesen", lambda q: "torch==2.8.0\nsix==1.17.0\n")
+    monkeypatch.setattr(motor, "uv_programm", lambda: "uv")
+    aufrufe = []
+
+    def run(befehl, **kw):
+        aufrufe.append(befehl)
+        if "--dry-run" in befehl:
+            return sp.CompletedProcess(befehl, 0, "Audited 2 packages\nWould make no changes\n", "")
+        return sp.CompletedProcess(befehl, 0, "ok\n", "")
+
+    monkeypatch.setattr(motor.subprocess, "run", run)
+    uv = []
+    monkeypatch.setattr(motor.Installation, "_uv", lambda self, *a, **k: uv.append(a))
+    schritte = []
+    inst = motor.Installation("0.4.14", vor_tausch=lambda: schritte.append("vor"),
+                              nach_tausch=lambda: schritte.append("nach"))
+    inst._lauf()
+    assert inst.phase == "fertig" and schritte == ["vor", "nach"]
+    assert uv == [("pip", "install", "--python", str(py), "--no-deps", "--reinstall", "paket.zip")]
+    assert motor.installiert()["fassung"] == "0.4.14"
+
+    # Geänderte Bibliotheken: der schnelle Weg wird nicht genommen
+    monkeypatch.setattr(motor.subprocess, "run", lambda b, **k: sp.CompletedProcess(b, 0, "Would install 1 package", ""))
+    assert motor.Installation("0.4.15")._nur_taleward_noetig(motor.quelle("0.4.15")) is False

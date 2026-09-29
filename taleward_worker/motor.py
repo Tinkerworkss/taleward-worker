@@ -179,6 +179,8 @@ class Installation:
     def _installieren(self) -> None:
         q = quelle(self.fassung)
         self.zeilen.append(f"Fassung {self.fassung} → {q['ref']}" + ("" if q["genau"] else " (kein Tag, main)"))
+        if not self.testmodus and self._nur_taleward_noetig(q):
+            return self._nur_taleward(q)
         system = "test" if self.testmodus else "cpu" if self.backend == "cpu" else (
             "windows" if sys.platform == "win32" else "linux")
         self.erwartet_mb = ERWARTET_MB[system]
@@ -238,6 +240,53 @@ class Installation:
             {"fassung": self.fassung, "ref": q["ref"], "testmodus": self.testmodus, "backend": self.backend,
              "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
 
+
+    # ------------------------------------------------------------------ Schneller Weg bei neuer Serverfassung
+    def _nur_taleward_noetig(self, q: dict) -> bool:
+        """Sind die KI-Bibliotheken der neuen Fassung dieselben wie im installierten Motor? Dann reicht es, nur den
+        Taleward-Code zu tauschen (Sekunden statt 8 GB). Geprüft mit einem Probelauf von uv gegen den Motor."""
+        inst = installiert()
+        if not inst or inst.get("testmodus") or inst.get("backend", "cuda") != self.backend:
+            return False
+        try:
+            basis, extra = anforderungen_aufteilen(anforderungen_lesen(q["anforderungen"]))
+            ordner = pfade.basis() / "cache"
+            ordner.mkdir(parents=True, exist_ok=True)
+            (ordner / "pruefen.txt").write_text(basis + "\n" + extra, encoding="utf-8")
+            torch = "cpu" if self.backend == "cpu" else "auto"
+            res = subprocess.run([uv_programm(), "pip", "install", "--dry-run", "--python", str(pfade.motor_python()),
+                                  "--no-deps", "--torch-backend", torch, "-r", str(ordner / "pruefen.txt")],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                                 env=self._umgebung(), cwd=pfade.basis(), **_ohne_fenster())
+        except (MotorFehler, OSError, subprocess.SubprocessError):
+            return False
+        ausgabe = res.stdout + res.stderr
+        gleich = res.returncode == 0 and "Would make no changes" in ausgabe
+        self.zeilen.append("KI-Bibliotheken unverändert – nur der Taleward-Code wird getauscht." if gleich
+                           else "KI-Bibliotheken haben sich geändert – vollständige Installation.")
+        return gleich
+
+    def _nur_taleward(self, q: dict) -> None:
+        self.phase = "taleward"
+        py = str(pfade.motor_python())
+        if callable(self.vor_tausch):
+            self.vor_tausch()  # laufenden Worker anhalten (nur für wenige Sekunden)
+        try:
+            self._uv("pip", "install", "--python", py, "--no-deps", "--reinstall", q["paket"],
+                     anteil_von=0.1, anteil_bis=0.9)
+            pruefung = subprocess.run([py, "-c", "import app, sys; print('ok')"], capture_output=True, text=True,
+                                      timeout=120, **_ohne_fenster())
+            if "ok" not in pruefung.stdout:
+                raise MotorFehler("installation", pruefung.stderr[-2000:])
+            daten = installiert() or {}
+            daten.update({"fassung": self.fassung, "ref": q["ref"], "installiert": time.strftime("%Y-%m-%d %H:%M")})
+            (pfade.motor() / "taleward-motor.json").write_text(json.dumps(daten), encoding="utf-8")
+        except BaseException:
+            self.phase = "fehler"  # damit nach_tausch die alte Fassung stehen lässt
+            raise
+        finally:
+            if callable(self.nach_tausch):
+                self.nach_tausch()
 
     def _python_einrichten(self) -> Path:
         """Python 3.11 über uv holen und den Pfad zur python(.exe) liefern.
