@@ -190,6 +190,7 @@ class Installation:
         self.phase = "python"
         basis_python = self._python_einrichten()
         self._uv("venv", str(neu), "--python", str(basis_python), anteil_von=0.05, anteil_bis=0.06)
+        home_festlegen(neu, basis_python)
         py = str(neu / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
 
         self.phase = "pakete"
@@ -296,6 +297,13 @@ class Installation:
         bei Bedarf“). Python selbst ist dann trotzdem vollständig da – wir nehmen es direkt, ohne die Verknüpfung.
         """
         ordner = pfade.basis() / "python"
+        vorhanden = python_finden(ordner)
+        if vorhanden is not None and python_laeuft(vorhanden):
+            # Nicht neu installieren: uv würde dabei die Verknüpfung „cpython-3.11-…“ anfassen, an der ein älteres,
+            # noch laufendes KI-Paket hängen kann
+            self.zeilen.append(f"Python 3.11 vorhanden: {vorhanden.parent.name}")
+            self._ohne_verknuepfung = True  # uv soll den Python-Ordner (samt Verknüpfung) gar nicht erst durchsuchen
+            return vorhanden
         try:
             self._uv("python", "install", "3.11", "--no-bin", "--no-registry", anteil_von=0.0, anteil_bis=0.05, erwartet_mb=110,
                      messordner=ordner)
@@ -332,6 +340,47 @@ def _ist_umleitung(d: Path) -> bool:
         return bool(os.lstat(d).st_file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
     except (OSError, AttributeError):
         return False
+
+
+def python_laeuft(python: Path) -> bool:
+    try:
+        return subprocess.run([str(python), "-c", "print(1)"], capture_output=True, text=True, timeout=60,
+                              **_ohne_fenster()).stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def home_festlegen(venv: Path, python: Path) -> None:
+    """pyvenv.cfg: „home“ auf den echten Python-Ordner statt auf uvs Verknüpfung „cpython-3.11-…“. Die Verknüpfung
+    blockiert Windows manchmal (os error 448) oder legt sie bei einer Neuinstallation neu an – das KI-Paket fände sein
+    Python dann nicht mehr („uv trampoline failed to spawn Python child process“)."""
+    cfg = venv / "pyvenv.cfg"
+    try:
+        zeilen = cfg.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    neu = [f"home = {python.parent}" if z.strip().lower().startswith("home") and "=" in z else z for z in zeilen]
+    if neu != zeilen:
+        cfg.write_text("\n".join(neu) + "\n", encoding="utf-8")
+
+
+def reparieren() -> bool:
+    """Vor jedem Start: Zeigt das KI-Paket auf ein Python, das es nicht (mehr) gibt, auf das vorhandene umstellen.
+    True, wenn etwas geändert wurde."""
+    cfg = pfade.motor() / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    home = next((z.split("=", 1)[1].strip() for z in text.splitlines() if z.strip().lower().startswith("home")), "")
+    exe = "python.exe" if sys.platform == "win32" else "bin/python3.11"
+    echt = python_finden(pfade.basis() / "python") or python_finden(pfade.basis() / "python-ohne-uv")
+    if echt is None or (home and Path(home) == echt.parent and (Path(home) / exe).is_file()):
+        return False
+    if home and (Path(home) / exe).is_file() and "cpython-3.11-" not in Path(home).name:
+        return False  # zeigt schon auf einen echten, vorhandenen Ordner
+    home_festlegen(pfade.motor(), echt)
+    return True
 
 
 def python_finden(ordner: Path) -> Path | None:

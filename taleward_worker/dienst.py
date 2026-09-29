@@ -15,7 +15,7 @@ import time
 from collections import deque
 from datetime import date
 
-from taleward_worker import hardware, pfade
+from taleward_worker import hardware, motor, pfade
 from taleward_worker.einstellungen import Einstellungen
 
 VORSILBE = "@@taleward "
@@ -234,6 +234,12 @@ class Dienst:
             self._setzen("fehler", code="motor_fehlt")
             self._soll_laufen = False
             return
+        if not self._befehl and not os.environ.get("TALEWARD_MOTOR"):
+            try:
+                if motor.reparieren():
+                    self.protokoll.schreiben("KI-Paket zeigt jetzt direkt auf den Python-Ordner (Verknüpfung umgangen)")
+            except OSError:
+                pass
         self.protokoll.schreiben("Worker startet …")
         self._setzen("startet")
         extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {"start_new_session": True}
@@ -260,6 +266,7 @@ class Dienst:
 
     def _lesen(self, p: subprocess.Popen) -> None:
         letzter_fehler = ""
+        kaputt = False
         for zeile in p.stdout:
             zeile = zeile.rstrip()
             if zeile.startswith(VORSILBE):
@@ -272,6 +279,8 @@ class Dienst:
                 self.protokoll.schreiben(zeile)
                 if "Worker kann nicht starten" in zeile or "Error" in zeile:
                     letzter_fehler = zeile
+                if "trampoline failed" in zeile:  # das KI-Paket findet sein Python nicht
+                    kaputt, letzter_fehler = True, zeile
         code = p.wait()
         self.wach.aus()
         with self._sperre:
@@ -281,6 +290,10 @@ class Dienst:
             if not self._soll_laufen:
                 self._setzen("gestoppt")
             elif art == "abgelehnt":
+                self._soll_laufen = False
+            elif kaputt:  # Neustarten hilft nicht – die App bietet an, das KI-Paket neu zu installieren
+                self.protokoll.schreiben("Das KI-Paket findet sein Python nicht – bitte neu installieren")
+                self._setzen("fehler", code="motor_kaputt", text=letzter_fehler)
                 self._soll_laufen = False
             elif art == "fehler":  # Einrichtungsfehler (z. B. Modell fehlt auf dem Server): später erneut
                 self._neustart_um = time.monotonic() + ERNEUT_NACH_EINRICHTUNGSFEHLER

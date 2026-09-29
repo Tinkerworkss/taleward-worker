@@ -299,3 +299,30 @@ def test_neue_serverfassung_tauscht_nur_den_code(eigener_ordner, monkeypatch):
     # Geänderte Bibliotheken: der schnelle Weg wird nicht genommen
     monkeypatch.setattr(motor.subprocess, "run", lambda b, **k: sp.CompletedProcess(b, 0, "Would install 1 package", ""))
     assert motor.Installation("0.4.15")._nur_taleward_noetig(motor.quelle("0.4.15")) is False
+
+
+def test_ki_paket_zeigt_auf_echten_python_ordner(eigener_ordner, monkeypatch):
+    """Verweist das KI-Paket auf uvs Verknüpfung „cpython-3.11-…“ (die Windows mitunter sperrt oder uv neu anlegt),
+    stellt die App es vor dem Start auf den echten Ordner um."""
+    monkeypatch.setattr(motor.sys, "platform", "win32")
+    echt = pfade.basis() / "python" / "cpython-3.11.16-windows-x86_64-none"
+    echt.mkdir(parents=True)
+    (echt / "python.exe").write_text("")
+    pfade.motor().mkdir(parents=True, exist_ok=True)
+    cfg = pfade.motor() / "pyvenv.cfg"
+    cfg.write_text(f"home = {pfade.basis() / 'python' / 'cpython-3.11-windows-x86_64-none'}\nversion_info = 3.11\n")
+    assert motor.reparieren() is True
+    assert f"home = {echt}" in cfg.read_text() and "version_info = 3.11" in cfg.read_text()
+    assert motor.reparieren() is False  # schon richtig
+
+
+def test_kaputtes_ki_paket_startet_nicht_im_kreis(tmp_path):
+    skript = tmp_path / "kaputt.py"
+    skript.write_text("print('error: uv trampoline failed to spawn Python child process', flush=True)\n"
+                      "import sys; sys.exit(1)\n")
+    d = Dienst(Einstellungen(server="http://localhost:1", token="t"), befehl=[sys.executable, str(skript)])
+    d.starten()
+    assert _warten(lambda: d.zustand.get("code") == "motor_kaputt")
+    time.sleep(1.5)
+    assert not d.laeuft() and d.zustand["art"] == "fehler"
+    assert any("neu installieren" in z for z in d.protokoll.zeilen)

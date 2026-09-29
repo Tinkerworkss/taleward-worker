@@ -281,7 +281,7 @@
     if (art === "pausiert") liste.push(["Fortsetzen", "primary", () => api.pausieren(false)]);
     if (art === "gestoppt") liste.push(["Starten", "primary", () => api.starten()]);
     if (art === "fehler" || art === "abgestuerzt") {
-      if ((S.dienst.zustand.code || "") === "motor_fehlt") liste.push(["Installieren", "primary", () => { schritt = 2; }]);
+      if (["motor_fehlt", "motor_kaputt"].includes(S.dienst.zustand.code || "")) liste.push(["Installieren", "primary", () => { schritt = 2; }]);
       else liste.push(["Erneut versuchen", "primary", () => api.starten()]);
       liste.push(["Protokoll ansehen", "quiet", () => zeigeReiter("protokoll")]);
     }
