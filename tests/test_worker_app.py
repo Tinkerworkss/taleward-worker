@@ -30,7 +30,7 @@ def test_adressen():
 
 
 def test_modellwahl_nach_grafikspeicher():
-    assert hardware.modell_fuer(8192) == {"modell": "large-v3", "batch": 8}   # RTX 3060 Ti
+    assert hardware.modell_fuer(8192) == {"modell": "large-v3", "batch": 8}   # 8-GB-Karte
     assert hardware.modell_fuer(24576)["batch"] == 16
     assert hardware.modell_fuer(4096)["modell"] == "large-v3-turbo"
 

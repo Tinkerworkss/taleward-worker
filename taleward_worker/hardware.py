@@ -70,7 +70,7 @@ def _grafikkarten_lesen() -> list[Grafikkarte]:
 
 
 # Stufen nach verfügbarem Grafikspeicher (MB, für Taleward insgesamt). Gemessen: large-v3 mit Stapel 8 braucht auf
-# der RTX 3060 Ti höchstens ~5,5 GB (plus Windows). Die übrigen Werte sind vorsichtige Schätzungen; die App zeigt
+# einer 8-GB-Karte höchstens ~5,5 GB (plus Windows). Die übrigen Werte sind vorsichtige Schätzungen; die App zeigt
 # nach dem ersten Auftrag den gemessenen Höchstwert an. Dauer = grobe Schätzung für 4 Stunden Aufnahme.
 STUFEN = [
     # ab MB, Modell,           Stapel, Ausrichtung, Sprecher, Dauer für 4 h (min)
