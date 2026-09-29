@@ -1,0 +1,817 @@
+From d3a50a4dd4a2d5bcae22c8edbc669b679e404b4e Mon Sep 17 00:00:00 2001
+From: Taleward <twartanddesign@gmail.com>
+Date: Tue, 29 Sep 2026 12:55:42 +0200
+Subject: [PATCH] Recaps auch auf diesem PC: Ollama in der Worker-App
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Einstellung „Recaps auch auf diesem PC schreiben“: Die App lädt Ollama 0.34.4 (Windows .zip, Linux .tar.zst)
+  mit geprüfter SHA-256 in ihren Datenordner und startet es selbst auf einem eigenen Anschluss (11435);
+  ein schon installiertes Ollama (11434) hat Vorrang. Ohne Häkchen bekommt der Worker bewusst kein Sprachmodell.
+- Der Worker erfährt die Adresse über WORKER_LLM_URL und übernimmt dann auch Recaps (Server: „Lokales Modell“).
+- Anzeige von Fortschritt und Zustand, „Recaps“ in der Übersicht, Speicherplatz und „Ollama entfernen“.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ README.md                        |   7 +
+ pyproject.toml                   |   1 +
+ taleward_worker/dienst.py        |  15 ++
+ taleward_worker/einstellungen.py |   1 +
+ taleward_worker/oberflaeche.py   |  47 +++++-
+ taleward_worker/ollama.py        | 236 +++++++++++++++++++++++++++++++
+ taleward_worker/ui/app.js        |  24 +++-
+ taleward_worker/ui/index.html    |   7 +-
+ taleward_worker/ui/texte.js      |  18 +++
+ tests/test_ollama.py             | 153 ++++++++++++++++++++
+ uv.lock                          |  52 +++++++
+ 11 files changed, 558 insertions(+), 3 deletions(-)
+ create mode 100644 taleward_worker/ollama.py
+ create mode 100644 tests/test_ollama.py
+
+diff --git a/README.md b/README.md
+index 85e8df7..0fa2e4f 100644
+--- a/README.md
++++ b/README.md
+@@ -23,6 +23,13 @@ freigegeben werden.
+   - 2 bis 3,5 GB: Ausrichtung und Sprechertrennung laufen auf dem Prozessor.
+   - Ohne nutzbare NVIDIA-Karte: alles auf dem Prozessor. Das ist langsam, grob 4–10 Stunden für 4 Stunden Aufnahme, und installiert eine kleinere Prozessor-Fassung des KI-Pakets.
+ - **Schieberegler „Grafikspeicher für Taleward“:** Er legt fest, wie viel Grafikspeicher der Worker höchstens nutzt, der Rest bleibt für Spiele. Die App passt das Modell daran an und begrenzt PyTorch auf diesen Anteil. Nach jedem Auftrag zeigt sie Dauer und höchsten Grafikspeicher als gemessene Werte an. Die Zeiten vorher sind grobe Schätzungen.
++- **Recaps auch hier schreiben** (Einstellungen, freiwillig):
++  - Die App richtet Ollama mit einem lokalen Sprachmodell ein: etwa 1,4 GB Programm, beim ersten Recap etwa 5 GB
++    Sprachmodell.
++  - Ollama kommt in fester, geprüfter Fassung, ohne Administratorrechte, in den eigenen Datenordner.
++  - Ist auf dem PC schon ein Ollama installiert, nutzt die App dieses.
++  - Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.
++  - Transkription und Recap wechseln sich auf der Grafikkarte ab.
+ - Während eines Auftrags geht der PC nicht in den Ruhezustand.
+ - Die Aufnahmen werden nur im Arbeitsordner verarbeitet und danach gelöscht.
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index eba0971..a5e9ddb 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,7 @@ dependencies = [
+     "pillow>=10",
+     "httpx>=0.27",
+     "platformdirs>=4",
++    "zstandard>=0.22; sys_platform != 'win32'",  # Ollama für Linux kommt als .tar.zst
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/taleward_worker/dienst.py b/taleward_worker/dienst.py
+index cbfb97e..b7a28bf 100644
+--- a/taleward_worker/dienst.py
++++ b/taleward_worker/dienst.py
+@@ -117,6 +117,9 @@ class Dienst:
+         self.protokoll = Protokoll()
+         self.statistik = Statistik()
+         self.wach = Wachhalten()
++        from taleward_worker.ollama import OllamaDienst
++
++        self.ollama = OllamaDienst()
+         self._prozess: subprocess.Popen | None = None
+         self._sperre = threading.RLock()
+         self._soll_laufen = False
+@@ -205,11 +208,23 @@ class Dienst:
+             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
+             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+             "PATH": str(pfade.werkzeuge()) + os.pathsep + env.get("PATH", ""),
++            # Recaps mit Ollama: eigenes/vorhandenes Ollama oder bewusst keins (sonst fände der Worker ein fremdes)
++            "WORKER_LLM_URL": self._ollama_adresse(),
+         })
+         for schluessel in ("VIRTUAL_ENV", "HF_TOKEN", "DATABASE_URL"):
+             env.pop(schluessel, None)
+         return env
+ 
++    def _ollama_adresse(self) -> str:
++        from taleward_worker.ollama import AUS
++
++        if self.e.testmodus:
++            return AUS
++        adresse = self.ollama.adresse(self.e.recaps_lokal)
++        if adresse != self.ollama.eigene_adresse:
++            self.ollama.stoppen()  # abgeschaltet oder ein anderes Ollama übernimmt
++        return adresse
++
+     def _motor_starten(self) -> None:
+         befehl = self._motor_befehl()
+         if not self._befehl and not os.environ.get("TALEWARD_MOTOR") and not pfade.motor_python().exists():
+diff --git a/taleward_worker/einstellungen.py b/taleward_worker/einstellungen.py
+index 93e8d5b..c66144e 100644
+--- a/taleward_worker/einstellungen.py
++++ b/taleward_worker/einstellungen.py
+@@ -23,6 +23,7 @@ class Einstellungen:
+     autostart: bool = False
+     im_hintergrund: bool = True     # Fenster schließen = weiterlaufen (Symbol im Infobereich)
+     auto_update: bool = True        # neue Fassungen der App selbst installieren, sobald der Worker frei ist
++    recaps_lokal: bool = False      # Recaps auch hier schreiben (Ollama auf diesem PC)
+     pausiert: bool = False
+     motor_fassung: str = ""         # installierte Fassung des KI-Pakets (= Serverfassung)
+     motor_art: str = ""             # "ki" oder "test"
+diff --git a/taleward_worker/oberflaeche.py b/taleward_worker/oberflaeche.py
+index 967e20a..2dfaa9d 100644
+--- a/taleward_worker/oberflaeche.py
++++ b/taleward_worker/oberflaeche.py
+@@ -10,7 +10,7 @@ import threading
+ import time
+ import webbrowser
+ 
+-from taleward_worker import VERSION, autostart, hardware, motor, pfade, selbstupdate, server
++from taleward_worker import VERSION, autostart, hardware, motor, ollama, pfade, selbstupdate, server
+ from taleward_worker.dienst import Dienst
+ from taleward_worker.einstellungen import Einstellungen
+ 
+@@ -36,6 +36,7 @@ class Api:
+             "hardware": a.hardware, "serverVersion": a.server_version, "serverName": a.server_name,
+             "appUpdate": a.app_update.stand() if a.app_update else None, "trayVorhanden": a.tray is not None,
+             "entwicklung": bool(os.environ.get("TALEWARD_MOTOR")),
++            "ollama": a.ollama_stand(),
+         }
+ 
+     def hardware_pruefen(self) -> dict:
+@@ -108,6 +109,13 @@ class Api:
+             a.e.im_hintergrund = bool(wert)
+         elif name == "auto_update":
+             a.e.auto_update = bool(wert)
++        elif name == "recaps_lokal":
++            a.e.recaps_lokal = bool(wert)
++            a.e.speichern()
++            if a.e.recaps_lokal and not ollama.installiert() and not ollama.antwortet(ollama.FREMDE_ADRESSE):
++                a.ollama_installieren()
++            else:
++                a.dienst.neu_starten_wenn_frei()
+         elif name == "modell" and wert in ("auto", "large-v3", "large-v3-turbo"):
+             a.e.modell = wert
+             a.e.speichern()
+@@ -151,10 +159,20 @@ class Api:
+         self._app.e.motor_fassung = ""
+         self._app.e.speichern()
+ 
++    def ollama_entfernen(self) -> None:
++        a = self._app
++        a.e.recaps_lokal = False
++        a.e.speichern()
++        if a.ollama_installation:
++            a.ollama_installation.abbrechen()
++        a.dienst.ollama.entfernen()
++        a.dienst.neu_starten_wenn_frei()
++
+     def speicherbelegung(self) -> dict:
+         def mb(p):
+             return pfade.ordnergroesse(p) // 2 ** 20 if p.exists() else 0
+         return {"motorMb": mb(pfade.motor()) + mb(pfade.basis() / "python"), "modelleMb": mb(pfade.modelle()),
++                "ollamaMb": mb(ollama.ordner()) + mb(ollama.modellordner()),
+                 "ordner": str(pfade.basis())}
+ 
+     def protokoll(self) -> list[str]:
+@@ -190,6 +208,8 @@ class WorkerApp:
+         self.e = Einstellungen.laden()
+         self.dienst = Dienst(self.e)
+         self.installation: motor.Installation | None = None
++        self.ollama_installation: ollama.Installation | None = None
++        self._fremd_geprueft: tuple[float, bool] = (0.0, False)
+         self.hardware: dict | None = None
+         self.server_version: str | None = None
+         self.server_name: str | None = None
+@@ -222,6 +242,30 @@ class WorkerApp:
+             return False  # Grafikkarte gewünscht, installiert ist nur die Prozessor-Fassung
+         return not self.server_version or inst.get("fassung") == self.server_version
+ 
++    # -- Ollama (lokale Recaps)
++    def ollama_installieren(self) -> None:
++        if self.ollama_installation and self.ollama_installation.phase in ("laden", "entpacken"):
++            return
++        self.ollama_installation = ollama.Installation()
++        faden = self.ollama_installation.starten()
++
++        def danach():
++            faden.join()
++            if self.ollama_installation.phase == "fertig":
++                self.dienst.neu_starten_wenn_frei()
++        threading.Thread(target=danach, daemon=True).start()
++
++    def ollama_stand(self) -> dict:
++        jetzt = time.monotonic()
++        if jetzt - self._fremd_geprueft[0] > 10:  # die Oberfläche fragt oft – das fremde Ollama selten prüfen
++            self._fremd_geprueft = (jetzt, ollama.antwortet(ollama.FREMDE_ADRESSE, 0.5)
++                                    if not self.dienst.ollama.laeuft() else False)
++        inst = self.ollama_installation
++        return {"an": self.e.recaps_lokal, "installiert": ollama.installiert(), "laeuft": self.dienst.ollama.laeuft(),
++                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG,
++                "installation": inst.stand() if inst and inst.phase != "fertig" else None,
++                "sprachmodell": self.dienst.info.get("llm")}
++
+     def installieren(self, testmodus: bool) -> None:
+         if self.installation and self.installation.phase not in ("fertig", "fehler", "abgebrochen"):
+             return
+@@ -325,6 +369,7 @@ class WorkerApp:
+     def beenden(self) -> None:
+         self._beendet.set()
+         self.dienst.stoppen()
++        self.dienst.ollama.stoppen()
+         if self.tray is not None:
+             try:
+                 self.tray.stop()
+diff --git a/taleward_worker/ollama.py b/taleward_worker/ollama.py
+new file mode 100644
+index 0000000..c21b5a6
+--- /dev/null
++++ b/taleward_worker/ollama.py
+@@ -0,0 +1,236 @@
++"""Lokale Recaps: Ollama auf diesem PC.
++
++- Läuft schon ein eigenes Ollama (Standardadresse 127.0.0.1:11434), nutzt der Worker dieses.
++- Sonst lädt die App Ollama in fester, geprüfter Fassung in ihren Datenordner (kein Administrator nötig) und startet
++  es selbst als Unterprozess auf einem eigenen Anschluss, damit es sich mit keinem anderen Ollama in die Quere kommt.
++- Das Sprachmodell lädt der Worker beim ersten Recap über Ollama (etwa 5 GB); danach wird es jeweils wieder
++  entladen, damit die Grafikkarte für die Transkription frei ist.
++"""
++from __future__ import annotations
++
++import atexit
++import hashlib
++import os
++import shutil
++import subprocess
++import sys
++import tarfile
++import threading
++import time
++import zipfile
++from pathlib import Path
++
++import httpx
++
++from taleward_worker import pfade
++
++FASSUNG = "0.34.4"
++QUELLE = f"https://github.com/ollama/ollama/releases/download/v{FASSUNG}"
++DATEIEN = {  # Datei und SHA-256 (aus dem Release, von GitHub geprüft)
++    "windows": ("ollama-windows-amd64.zip", "535193f38f3344e5b08f5d1c171c31ce11aa17f0124ff69ae26d8ec7fe06fa62"),
++    "linux": ("ollama-linux-amd64.tar.zst", "c238986e61d40c0cc5f4a9b9e40b9eea104350b77efa34741fc134e105cb9533"),
++}
++GROESSE_MB = {"windows": 1394, "linux": 1362}
++EIGENER_PORT = 11435
++FREMDE_ADRESSE = "http://127.0.0.1:11434"
++AUS = "http://127.0.0.1:9"  # Worker ohne Sprachmodell: eine Adresse, unter der sicher nichts antwortet
++
++
++def _system() -> str:
++    return "windows" if sys.platform == "win32" else "linux"
++
++
++def ordner() -> Path:
++    return pfade.basis() / "ollama"
++
++
++def modellordner() -> Path:
++    return pfade.basis() / "ollama-modelle"
++
++
++def antwortet(url: str, zeit: float = 2.0) -> bool:
++    try:
++        return httpx.get(f"{url}/api/version", timeout=zeit).status_code == 200
++    except httpx.HTTPError:
++        return False
++
++
++def programm() -> Path | None:
++    name = "ollama.exe" if sys.platform == "win32" else "ollama"
++    wurzel = ordner()
++    if not wurzel.exists():
++        return None
++    for p in (wurzel / name, wurzel / "bin" / name):
++        if p.is_file():
++            return p
++    for p in wurzel.rglob(name):
++        if p.is_file():
++            return p
++    return None
++
++
++def installiert() -> bool:
++    try:
++        return (ordner() / "fassung.txt").read_text(encoding="utf-8").strip() == FASSUNG and programm() is not None
++    except OSError:
++        return False
++
++
++class Installation:
++    """Ollama herunterladen, prüfen und entpacken – im Hintergrund, mit Fortschritt für die Oberfläche."""
++
++    def __init__(self):
++        self.phase = "laden"   # laden | entpacken | fertig | fehler | abgebrochen
++        self.anteil = 0.0
++        self.fehlertext = ""
++        self._abbrechen = threading.Event()
++
++    def stand(self) -> dict:
++        return {"phase": self.phase, "anteil": round(self.anteil, 3), "fehler": self.fehlertext,
++                "erwartetMb": GROESSE_MB[_system()]}
++
++    def abbrechen(self) -> None:
++        self._abbrechen.set()
++
++    def starten(self) -> threading.Thread:
++        t = threading.Thread(target=self._lauf, daemon=True, name="ollama-installation")
++        t.start()
++        return t
++
++    def _lauf(self) -> None:
++        name, soll = DATEIEN[_system()]
++        ziel = pfade.basis() / f"{name}.teil"
++        try:
++            pfade.basis().mkdir(parents=True, exist_ok=True)
++            self._laden(f"{QUELLE}/{name}", ziel, soll)
++            self.phase, self.anteil = "entpacken", 0.97
++            self._entpacken(ziel, zip_datei=name.endswith(".zip"))
++            self.phase, self.anteil = "fertig", 1.0
++        except _Abbruch:
++            self.phase = "abgebrochen"
++        except Exception as e:  # noqa: BLE001 – Text für die Oberfläche
++            self.phase, self.fehlertext = "fehler", f"{type(e).__name__}: {e}"[:300]
++        finally:
++            ziel.unlink(missing_ok=True)
++
++    def _laden(self, url: str, ziel: Path, soll: str) -> None:
++        h = hashlib.sha256()
++        with httpx.stream("GET", url, follow_redirects=True, timeout=httpx.Timeout(60.0, read=120.0)) as r:
++            r.raise_for_status()
++            gesamt = int(r.headers.get("content-length") or 0) or GROESSE_MB[_system()] * 2 ** 20
++            geladen = 0
++            with ziel.open("wb") as f:
++                for block in r.iter_bytes(1024 * 512):
++                    if self._abbrechen.is_set():
++                        raise _Abbruch
++                    h.update(block)
++                    f.write(block)
++                    geladen += len(block)
++                    self.anteil = min(0.96, geladen / gesamt * 0.96)
++        if h.hexdigest() != soll:
++            raise RuntimeError("Prüfsumme von Ollama stimmt nicht – Download verworfen.")
++
++    def _entpacken(self, datei: Path, zip_datei: bool) -> None:
++        neu = pfade.basis() / "ollama-neu"
++        shutil.rmtree(neu, ignore_errors=True)
++        neu.mkdir(parents=True)
++        if zip_datei:
++            with zipfile.ZipFile(datei) as z:
++                _sicher_entpacken_zip(z, neu)
++        else:
++            import zstandard
++
++            with datei.open("rb") as roh, zstandard.ZstdDecompressor().stream_reader(roh) as strom, \
++                    tarfile.open(fileobj=strom, mode="r|") as tar:
++                tar.extractall(neu, filter="data")
++        (neu / "fassung.txt").write_text(FASSUNG, encoding="utf-8")
++        alt = ordner()
++        shutil.rmtree(alt, ignore_errors=True)
++        neu.rename(alt)
++        p = programm()
++        if p is None:
++            raise RuntimeError("Ollama nicht im Archiv gefunden.")
++        if sys.platform != "win32":
++            p.chmod(0o755)
++
++
++class _Abbruch(Exception):
++    pass
++
++
++def _sicher_entpacken_zip(z: zipfile.ZipFile, ziel: Path) -> None:
++    wurzel = ziel.resolve()
++    for eintrag in z.infolist():
++        pfad = (ziel / eintrag.filename).resolve()
++        if wurzel not in pfad.parents and pfad != wurzel:
++            raise RuntimeError(f"Unzulässiger Pfad im Archiv: {eintrag.filename}")
++    z.extractall(ziel)
++
++
++class OllamaDienst:
++    """Das selbst verwaltete Ollama: starten, prüfen, beenden."""
++
++    def __init__(self):
++        self._prozess: subprocess.Popen | None = None
++        self._sperre = threading.Lock()
++        atexit.register(self.stoppen)
++
++    @property
++    def eigene_adresse(self) -> str:
++        return f"http://127.0.0.1:{EIGENER_PORT}"
++
++    def laeuft(self) -> bool:
++        return self._prozess is not None and self._prozess.poll() is None
++
++    def adresse(self, an: bool) -> str:
++        """Für WORKER_LLM_URL: eigenes/fremdes Ollama oder AUS. Startet das eigene bei Bedarf."""
++        if not an:
++            return AUS
++        if antwortet(FREMDE_ADRESSE):
++            return FREMDE_ADRESSE
++        if installiert() and self.starten():
++            return self.eigene_adresse
++        return AUS
++
++    def starten(self, warten_s: float = 30.0) -> bool:
++        with self._sperre:
++            if self.laeuft():
++                return True
++            p = programm()
++            if p is None:
++                return False
++            modellordner().mkdir(parents=True, exist_ok=True)
++            env = {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{EIGENER_PORT}", "OLLAMA_MODELS": str(modellordner()),
++                   "OLLAMA_KEEP_ALIVE": "2m", "OLLAMA_MAX_LOADED_MODELS": "1"}
++            log = open(pfade.protokolle() / "ollama.log", "ab")
++            extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {"start_new_session": True}
++            try:
++                self._prozess = subprocess.Popen([str(p), "serve"], stdout=log, stderr=subprocess.STDOUT, env=env,
++                                                 cwd=str(p.parent), **extra)
++            except OSError:
++                return False
++            finally:
++                log.close()
++        ende = time.monotonic() + warten_s
++        while time.monotonic() < ende:
++            if antwortet(self.eigene_adresse, 1.0):
++                return True
++            if not self.laeuft():
++                return False
++            time.sleep(0.5)
++        return False
++
++    def stoppen(self) -> None:
++        p = self._prozess
++        if p and p.poll() is None:
++            p.terminate()
++            try:
++                p.wait(10)
++            except subprocess.TimeoutExpired:
++                p.kill()
++        self._prozess = None
++
++    def entfernen(self) -> None:
++        self.stoppen()
++        shutil.rmtree(ordner(), ignore_errors=True)
++        shutil.rmtree(modellordner(), ignore_errors=True)
+diff --git a/taleward_worker/ui/app.js b/taleward_worker/ui/app.js
+index da03209..ed6aa5a 100644
+--- a/taleward_worker/ui/app.js
++++ b/taleward_worker/ui/app.js
+@@ -233,6 +233,8 @@
+       if (m.peakMb) mt += " · " + t("messung_peak", { gb: gb(m.peakMb) });
+     }
+     $("#i-messung").textContent = mt;
++    const o = S.ollama || {};
++    $("#i-recaps").textContent = o.an && o.sprachmodell ? t("recaps_lokal", { modell: o.sprachmodell }) : t("recaps_server");
+     $("#i-fassung").textContent = t("fassung_text", { app: S.version, motor: S.motor ? S.motor.fassung || S.motor.ref : "–" });
+     // Hinweise
+     const inst = S.installation;
+@@ -307,13 +309,32 @@
+     $("#fuss-version").textContent = "Taleward Worker " + S.version;
+     const k = S.hardware && S.hardware.grafikkarte;
+     $("#zeile-prozessor").hidden = !(k && S.hardware.grafikkarteNutzbar) || S.einstellungen.testmodus;
++    $("#zeile-recaps").hidden = !!S.einstellungen.testmodus;
++    ollamaZeigen();
+     if (document.activeElement !== $("#nur-prozessor")) $("#nur-prozessor").checked = S.einstellungen.geraet === "cpu";
+     reglerZeigen();
+   }
+ 
++  function ollamaZeigen() {
++    const o = S.ollama || {};
++    const inst = o.installation;
++    let text = "";
++    if (inst && inst.phase === "laden") text = t("ollama_laedt", { p: Math.round(inst.anteil * 100) + " %" });
++    else if (inst && inst.phase === "entpacken") text = t("ollama_entpackt");
++    else if (inst && inst.phase === "fehler") text = t("ollama_fehler", { text: inst.fehler });
++    else if (o.an && o.fremd) text = t("ollama_fremd");
++    else if (o.an && o.laeuft) text = o.sprachmodell ? t("ollama_bereit_modell", { modell: o.sprachmodell }) : t("ollama_bereit");
++    else if (o.an && o.installiert) text = t("ollama_startet");
++    $("#ollama-stand").textContent = text;
++    $("#ollama-stand").hidden = !text;
++    $("#ollama-entfernen").hidden = !o.installiert;
++  }
++
+   async function speicherLaden() {
+     const s = await api.speicherbelegung();
+-    $("#speicher").textContent = t("speicher_text", { motor: gb(s.motorMb), modelle: gb(s.modelleMb) });
++    let text = t("speicher_text", { motor: gb(s.motorMb), modelle: gb(s.modelleMb) });
++    if (s.ollamaMb) text += " " + t("speicher_ollama", { mb: gb(s.ollamaMb) });
++    $("#speicher").textContent = text;
+   }
+ 
+   async function logLaden(ganz) {
+@@ -410,6 +431,7 @@
+     $("#ordner").onclick = () => api.ordner_oeffnen();
+     $("#log-ordner").onclick = () => api.ordner_oeffnen();
+     $("#verwaltung").onclick = () => api.verwaltung_oeffnen();
++    $("#ollama-entfernen").onclick = async () => { if (confirm(t("bestaetigen_ollama"))) { await api.ollama_entfernen(); speicherLaden(); neuLaden(); } };
+     $("#neu-koppeln").onclick = async () => { if (confirm(t("bestaetigen_koppeln"))) { await api.entkoppeln(); reiter = "status"; neuLaden(); } };
+     $("#neu-installieren").onclick = async () => { await api.installieren(!!S.einstellungen.testmodus); reiter = "status"; zeigeReiter("status"); neuLaden(); };
+     $("#entfernen").onclick = async () => { if (confirm(t("bestaetigen_entfernen"))) { await api.ki_entfernen(true); schritt = 2; reiter = "status"; neuLaden(); } };
+diff --git a/taleward_worker/ui/index.html b/taleward_worker/ui/index.html
+index c5c4dfd..fd5eae6 100644
+--- a/taleward_worker/ui/index.html
++++ b/taleward_worker/ui/index.html
+@@ -135,6 +135,7 @@
+       <dt data-t="Grafikkarte"></dt><dd id="i-gpu"></dd>
+       <dt data-t="Arbeitsweise"></dt><dd id="i-modell"></dd>
+       <dt data-t="Gemessen"></dt><dd id="i-messung"></dd>
++      <dt data-t="Recaps"></dt><dd id="i-recaps"></dd>
+       <dt data-t="Fassung"></dt><dd id="i-fassung"></dd>
+     </dl>
+   </div>
+@@ -149,6 +150,9 @@
+       <label class="schalter"><input type="checkbox" data-einstellung="im_hintergrund"><span></span></label></div>
+     <div class="zeile"><div class="zeile__text"><strong data-t="update_titel"></strong><span data-t="update_text"></span></div>
+       <label class="schalter"><input type="checkbox" data-einstellung="auto_update"><span></span></label></div>
++    <div class="zeile" id="zeile-recaps"><div class="zeile__text"><strong data-t="recaps_titel"></strong><span data-t="recaps_text"></span>
++        <span class="leise" id="ollama-stand" aria-live="polite"></span></div>
++      <label class="schalter"><input type="checkbox" data-einstellung="recaps_lokal"><span></span></label></div>
+     <div class="regler" data-regler hidden>
+         <div class="regler__kopf"><div class="zeile__text"><strong data-t="regler_titel"></strong><span data-t="regler_text"></span></div>
+           <output class="regler__wert" data-regler-wert></output></div>
+@@ -171,7 +175,8 @@
+     <h2 data-t="Speicherplatz"></h2>
+     <p class="leise" id="speicher"></p>
+     <div class="knopfreihe"><button class="tw-btn tw-btn--secondary" id="ordner" data-t="Ordner öffnen"></button>
+-      <button class="tw-btn tw-btn--secondary" id="verwaltung" data-t="Verwaltung öffnen"></button></div>
++      <button class="tw-btn tw-btn--secondary" id="verwaltung" data-t="Verwaltung öffnen"></button>
++      <button class="tw-btn tw-btn--secondary" id="ollama-entfernen" data-t="ollama_entfernen" hidden></button></div>
+   </div>
+   <div class="karte gefahr">
+     <h2 data-t="Verbindung und KI-Paket"></h2>
+diff --git a/taleward_worker/ui/texte.js b/taleward_worker/ui/texte.js
+index 0a3990a..1810813 100644
+--- a/taleward_worker/ui/texte.js
++++ b/taleward_worker/ui/texte.js
+@@ -2,6 +2,15 @@
+ window.TEXTE = {
+   de: {
+     update_titel: "Updates automatisch installieren",
++    recaps_titel: "Recaps auch auf diesem PC schreiben",
++    recaps_text: "Mit einem lokalen Sprachmodell (Ollama), ohne Cloud. Einmalig etwa 1,4 GB Programm und 5 GB Sprachmodell. Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.",
++    ollama_laedt: "Ollama wird geladen … {p}", ollama_entpackt: "Ollama wird eingerichtet …",
++    ollama_bereit: "Bereit.", ollama_bereit_modell: "Bereit – Sprachmodell {modell}.",
++    ollama_fremd: "Nutzt das vorhandene Ollama auf diesem PC.", ollama_fehler: "Ollama ließ sich nicht einrichten: {text}",
++    ollama_startet: "Ollama ist eingerichtet und startet mit dem Worker.",
++    speicher_ollama: "Ollama mit Sprachmodell {mb}.", ollama_entfernen: "Ollama entfernen",
++    bestaetigen_ollama: "Ollama und das Sprachmodell von diesem PC entfernen?",
++    "Recaps": "Recaps", recaps_lokal: "hier, mit {modell}", recaps_server: "macht der Server bzw. ein anderer Worker",
+     update_text: "Neue Fassungen kommen von deinem Server und werden installiert, sobald der Worker nichts zu tun hat.",
+     app_update_auto: "Wird automatisch installiert, sobald der Worker frei ist.",
+     app_update_laden: "Wird geladen … {prozent}", app_update_installieren: "Wird installiert – der Worker startet gleich neu.",
+@@ -115,6 +124,15 @@ window.TEXTE = {
+     "Worker beenden": "Quit worker", "Kopieren": "Copy", "Zurück": "Back", "Pausieren": "Pause", "Fortsetzen": "Resume",
+     "Starten": "Start", "Anhalten": "Stop", "Jetzt aktualisieren": "Update now", "Herunterladen": "Download",
+     update_titel: "Install updates automatically",
++    recaps_titel: "Write recaps on this PC too",
++    recaps_text: "With a local language model (Ollama), no cloud. About 1.4 GB program and 5 GB language model, once. On the server, “Local model” must be selected under “Summary”.",
++    ollama_laedt: "Downloading Ollama … {p}", ollama_entpackt: "Setting up Ollama …",
++    ollama_bereit: "Ready.", ollama_bereit_modell: "Ready – language model {modell}.",
++    ollama_fremd: "Uses the Ollama already installed on this PC.", ollama_fehler: "Ollama could not be set up: {text}",
++    ollama_startet: "Ollama is set up and starts with the worker.",
++    speicher_ollama: "Ollama with language model {mb}.", ollama_entfernen: "Remove Ollama",
++    bestaetigen_ollama: "Remove Ollama and the language model from this PC?",
++    "Recaps": "Recaps", recaps_lokal: "here, with {modell}", recaps_server: "done by the server or another worker",
+     update_text: "New versions come from your server and are installed as soon as the worker has nothing to do.",
+     app_update_auto: "Will be installed automatically as soon as the worker is free.",
+     app_update_laden: "Downloading … {prozent}", app_update_installieren: "Installing – the worker restarts in a moment.",
+diff --git a/tests/test_ollama.py b/tests/test_ollama.py
+new file mode 100644
+index 0000000..77a314e
+--- /dev/null
++++ b/tests/test_ollama.py
+@@ -0,0 +1,153 @@
++"""Lokale Recaps: Ollama laden, prüfen, entpacken, starten und dem Worker bekanntmachen."""
++import hashlib
++import http.server
++import io
++import sys
++import tarfile
++import threading
++import zipfile
++
++import pytest
++
++from taleward_worker import ollama
++
++FAKE_OLLAMA = r'''#!{python}
++# Nachgebautes Ollama: „ollama serve“ beantwortet /api/version auf OLLAMA_HOST.
++import http.server, json, os, sys
++host, port = os.environ["OLLAMA_HOST"].split(":")
++assert sys.argv[1:] == ["serve"] and os.environ["OLLAMA_MODELS"] and os.environ["OLLAMA_KEEP_ALIVE"] == "2m"
++class H(http.server.BaseHTTPRequestHandler):
++    def do_GET(self):
++        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
++        self.wfile.write(json.dumps({{"version": "0.34.4"}}).encode())
++    def log_message(self, *a): pass
++http.server.HTTPServer((host, int(port)), H).serve_forever()
++'''
++
++
++def _programm() -> bytes:
++    return FAKE_OLLAMA.format(python=sys.executable).encode()
++
++
++def _zip() -> bytes:
++    puffer = io.BytesIO()
++    with zipfile.ZipFile(puffer, "w") as z:
++        info = zipfile.ZipInfo("bin/ollama")
++        info.external_attr = 0o755 << 16
++        z.writestr(info, _programm())
++        z.writestr("lib/ollama/readme.txt", "Bibliotheken")
++    return puffer.getvalue()
++
++
++def _tar_zst() -> bytes:
++    import zstandard
++
++    roh = io.BytesIO()
++    with tarfile.open(fileobj=roh, mode="w") as tar:
++        daten = _programm()
++        info = tarfile.TarInfo("bin/ollama")
++        info.size, info.mode = len(daten), 0o755
++        tar.addfile(info, io.BytesIO(daten))
++    return zstandard.ZstdCompressor().compress(roh.getvalue())
++
++
++@pytest.fixture()
++def quelle(monkeypatch):
++    """Kleiner HTTP-Server, der die Archive ausliefert."""
++    dateien: dict[str, bytes] = {}
++
++    class H(http.server.BaseHTTPRequestHandler):
++        def do_GET(self):
++            inhalt = dateien.get(self.path.rsplit("/", 1)[-1])
++            if inhalt is None:
++                self.send_response(404)
++                self.end_headers()
++                return
++            self.send_response(200)
++            self.send_header("Content-Length", str(len(inhalt)))
++            self.end_headers()
++            self.wfile.write(inhalt)
++
++        def log_message(self, *a):
++            pass
++
++    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
++    threading.Thread(target=srv.serve_forever, daemon=True).start()
++    monkeypatch.setattr(ollama, "QUELLE", f"http://127.0.0.1:{srv.server_address[1]}")
++    yield dateien
++    srv.shutdown()
++
++
++def _installieren(monkeypatch, quelle, name, inhalt, sha=None):
++    quelle[name] = inhalt
++    monkeypatch.setattr(ollama, "DATEIEN", {"linux": (name, sha or hashlib.sha256(inhalt).hexdigest()),
++                                            "windows": (name, sha or hashlib.sha256(inhalt).hexdigest())})
++    inst = ollama.Installation()
++    inst.starten().join(30)
++    return inst
++
++
++@pytest.mark.skipif(sys.platform == "win32", reason="nachgebautes Programm ist ein Python-Skript")
++def test_laden_entpacken_starten(monkeypatch, quelle, tmp_path):
++    monkeypatch.setattr(ollama, "EIGENER_PORT", 11499)
++    monkeypatch.setattr(ollama, "FREMDE_ADRESSE", "http://127.0.0.1:9")  # kein fremdes Ollama
++    inst = _installieren(monkeypatch, quelle, "ollama-linux-amd64.zip", _zip())
++    assert inst.phase == "fertig", inst.fehlertext
++    assert ollama.installiert() and ollama.programm().name == "ollama"
++    assert not list(ollama.pfade.basis().glob("*.teil"))  # Download aufgeräumt
++
++    dienst = ollama.OllamaDienst()
++    try:
++        assert dienst.adresse(False) == ollama.AUS
++        assert dienst.adresse(True) == "http://127.0.0.1:11499" and dienst.laeuft()
++        assert ollama.antwortet(dienst.eigene_adresse)
++    finally:
++        dienst.stoppen()
++    assert not dienst.laeuft()
++
++
++@pytest.mark.skipif(sys.platform == "win32", reason="Linux-Archiv")
++def test_linux_archiv_tar_zst(monkeypatch, quelle):
++    inst = _installieren(monkeypatch, quelle, "ollama-linux-amd64.tar.zst", _tar_zst())
++    assert inst.phase == "fertig", inst.fehlertext
++    assert ollama.programm() is not None and ollama.installiert()
++
++
++def test_falsche_pruefsumme_wird_verworfen(monkeypatch, quelle):
++    inst = _installieren(monkeypatch, quelle, "ollama-linux-amd64.zip", _zip(), sha="0" * 64)
++    assert inst.phase == "fehler" and "Prüfsumme" in inst.fehlertext
++    assert not ollama.installiert() and not list(ollama.pfade.basis().glob("*.teil"))
++
++
++def test_zip_mit_ausbruchspfad_wird_abgelehnt(monkeypatch, quelle):
++    puffer = io.BytesIO()
++    with zipfile.ZipFile(puffer, "w") as z:
++        z.writestr("../../boese.txt", "x")
++    inst = _installieren(monkeypatch, quelle, "ollama-linux-amd64.zip", puffer.getvalue())
++    assert inst.phase == "fehler" and "Unzulässiger Pfad" in inst.fehlertext
++
++
++def test_vorhandenes_ollama_hat_vorrang(monkeypatch):
++    monkeypatch.setattr(ollama, "antwortet", lambda url, zeit=2.0: url == ollama.FREMDE_ADRESSE)
++    dienst = ollama.OllamaDienst()
++    assert dienst.adresse(True) == ollama.FREMDE_ADRESSE and not dienst.laeuft()
++    assert dienst.adresse(False) == ollama.AUS
++
++
++def test_ohne_ollama_bleibt_der_worker_ohne_sprachmodell(monkeypatch):
++    monkeypatch.setattr(ollama, "antwortet", lambda url, zeit=2.0: False)
++    assert ollama.OllamaDienst().adresse(True) == ollama.AUS  # nicht installiert, nichts läuft
++
++
++def test_motor_umgebung_nennt_ollama(monkeypatch):
++    from taleward_worker.dienst import Dienst
++    from taleward_worker.einstellungen import Einstellungen
++
++    monkeypatch.setattr(ollama, "antwortet", lambda url, zeit=2.0: url == ollama.FREMDE_ADRESSE)
++    e = Einstellungen(server="https://x", token="t")
++    d = Dienst(e, befehl=["true"])
++    assert d._motor_umgebung()["WORKER_LLM_URL"] == ollama.AUS  # aus: auch ein fremdes Ollama nicht nutzen
++    e.recaps_lokal = True
++    assert d._motor_umgebung()["WORKER_LLM_URL"] == ollama.FREMDE_ADRESSE
++    e.testmodus = True
++    assert d._motor_umgebung()["WORKER_LLM_URL"] == ollama.AUS
+diff --git a/uv.lock b/uv.lock
+index 1ac3271..24674ad 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -600,6 +600,7 @@ dependencies = [
+     { name = "platformdirs" },
+     { name = "pystray" },
+     { name = "pywebview" },
++    { name = "zstandard", marker = "sys_platform != 'win32'" },
+ ]
+ 
+ [package.optional-dependencies]
+@@ -621,6 +622,7 @@ requires-dist = [
+     { name = "pystray", specifier = ">=0.19" },
+     { name = "pywebview", specifier = ">=5.3" },
+     { name = "pywebview", extras = ["qt"], marker = "extra == 'qt'", specifier = ">=5.3" },
++    { name = "zstandard", marker = "sys_platform != 'win32'", specifier = ">=0.22" },
+ ]
+ provides-extras = ["qt"]
+ 
+@@ -638,3 +640,53 @@ sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3
+ wheels = [
+     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
+ ]
++
++[[package]]
++name = "zstandard"
++version = "0.25.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/fd/aa/3e0508d5a5dd96529cdc5a97011299056e14c6505b678fd58938792794b1/zstandard-0.25.0.tar.gz", hash = "sha256:7713e1179d162cf5c7906da876ec2ccb9c3a9dcbdffef0cc7f70c3667a205f0b", size = 711513, upload-time = "2025-09-14T22:15:54.002Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/2a/83/c3ca27c363d104980f1c9cee1101cc8ba724ac8c28a033ede6aab89585b1/zstandard-0.25.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:933b65d7680ea337180733cf9e87293cc5500cc0eb3fc8769f4d3c88d724ec5c", size = 795254, upload-time = "2025-09-14T22:16:26.137Z" },
++    { url = "https://files.pythonhosted.org/packages/ac/4d/e66465c5411a7cf4866aeadc7d108081d8ceba9bc7abe6b14aa21c671ec3/zstandard-0.25.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a3f79487c687b1fc69f19e487cd949bf3aae653d181dfb5fde3bf6d18894706f", size = 640559, upload-time = "2025-09-14T22:16:27.973Z" },
++    { url = "https://files.pythonhosted.org/packages/12/56/354fe655905f290d3b147b33fe946b0f27e791e4b50a5f004c802cb3eb7b/zstandard-0.25.0-cp311-cp311-manylinux2010_i686.manylinux2014_i686.manylinux_2_12_i686.manylinux_2_17_i686.whl", hash = "sha256:0bbc9a0c65ce0eea3c34a691e3c4b6889f5f3909ba4822ab385fab9057099431", size = 5348020, upload-time = "2025-09-14T22:16:29.523Z" },
++    { url = "https://files.pythonhosted.org/packages/3b/13/2b7ed68bd85e69a2069bcc72141d378f22cae5a0f3b353a2c8f50ef30c1b/zstandard-0.25.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:01582723b3ccd6939ab7b3a78622c573799d5d8737b534b86d0e06ac18dbde4a", size = 5058126, upload-time = "2025-09-14T22:16:31.811Z" },
++    { url = "https://files.pythonhosted.org/packages/c9/dd/fdaf0674f4b10d92cb120ccff58bbb6626bf8368f00ebfd2a41ba4a0dc99/zstandard-0.25.0-cp311-cp311-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:5f1ad7bf88535edcf30038f6919abe087f606f62c00a87d7e33e7fc57cb69fcc", size = 5405390, upload-time = "2025-09-14T22:16:33.486Z" },
++    { url = "https://files.pythonhosted.org/packages/0f/67/354d1555575bc2490435f90d67ca4dd65238ff2f119f30f72d5cde09c2ad/zstandard-0.25.0-cp311-cp311-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:06acb75eebeedb77b69048031282737717a63e71e4ae3f77cc0c3b9508320df6", size = 5452914, upload-time = "2025-09-14T22:16:35.277Z" },
++    { url = "https://files.pythonhosted.org/packages/bb/1f/e9cfd801a3f9190bf3e759c422bbfd2247db9d7f3d54a56ecde70137791a/zstandard-0.25.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:9300d02ea7c6506f00e627e287e0492a5eb0371ec1670ae852fefffa6164b072", size = 5559635, upload-time = "2025-09-14T22:16:37.141Z" },
++    { url = "https://files.pythonhosted.org/packages/21/88/5ba550f797ca953a52d708c8e4f380959e7e3280af029e38fbf47b55916e/zstandard-0.25.0-cp311-cp311-musllinux_1_1_aarch64.whl", hash = "sha256:bfd06b1c5584b657a2892a6014c2f4c20e0db0208c159148fa78c65f7e0b0277", size = 5048277, upload-time = "2025-09-14T22:16:38.807Z" },
++    { url = "https://files.pythonhosted.org/packages/46/c0/ca3e533b4fa03112facbe7fbe7779cb1ebec215688e5df576fe5429172e0/zstandard-0.25.0-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:f373da2c1757bb7f1acaf09369cdc1d51d84131e50d5fa9863982fd626466313", size = 5574377, upload-time = "2025-09-14T22:16:40.523Z" },
++    { url = "https://files.pythonhosted.org/packages/12/9b/3fb626390113f272abd0799fd677ea33d5fc3ec185e62e6be534493c4b60/zstandard-0.25.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:6c0e5a65158a7946e7a7affa6418878ef97ab66636f13353b8502d7ea03c8097", size = 4961493, upload-time = "2025-09-14T22:16:43.3Z" },
++    { url = "https://files.pythonhosted.org/packages/cb/d3/23094a6b6a4b1343b27ae68249daa17ae0651fcfec9ed4de09d14b940285/zstandard-0.25.0-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:c8e167d5adf59476fa3e37bee730890e389410c354771a62e3c076c86f9f7778", size = 5269018, upload-time = "2025-09-14T22:16:45.292Z" },
++    { url = "https://files.pythonhosted.org/packages/8c/a7/bb5a0c1c0f3f4b5e9d5b55198e39de91e04ba7c205cc46fcb0f95f0383c1/zstandard-0.25.0-cp311-cp311-musllinux_1_2_ppc64le.whl", hash = "sha256:98750a309eb2f020da61e727de7d7ba3c57c97cf6213f6f6277bb7fb42a8e065", size = 5443672, upload-time = "2025-09-14T22:16:47.076Z" },
++    { url = "https://files.pythonhosted.org/packages/27/22/503347aa08d073993f25109c36c8d9f029c7d5949198050962cb568dfa5e/zstandard-0.25.0-cp311-cp311-musllinux_1_2_s390x.whl", hash = "sha256:22a086cff1b6ceca18a8dd6096ec631e430e93a8e70a9ca5efa7561a00f826fa", size = 5822753, upload-time = "2025-09-14T22:16:49.316Z" },
++    { url = "https://files.pythonhosted.org/packages/e2/be/94267dc6ee64f0f8ba2b2ae7c7a2df934a816baaa7291db9e1aa77394c3c/zstandard-0.25.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:72d35d7aa0bba323965da807a462b0966c91608ef3a48ba761678cb20ce5d8b7", size = 5366047, upload-time = "2025-09-14T22:16:51.328Z" },
++    { url = "https://files.pythonhosted.org/packages/82/fc/f26eb6ef91ae723a03e16eddb198abcfce2bc5a42e224d44cc8b6765e57e/zstandard-0.25.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:7b3c3a3ab9daa3eed242d6ecceead93aebbb8f5f84318d82cee643e019c4b73b", size = 795738, upload-time = "2025-09-14T22:16:56.237Z" },
++    { url = "https://files.pythonhosted.org/packages/aa/1c/d920d64b22f8dd028a8b90e2d756e431a5d86194caa78e3819c7bf53b4b3/zstandard-0.25.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:913cbd31a400febff93b564a23e17c3ed2d56c064006f54efec210d586171c00", size = 640436, upload-time = "2025-09-14T22:16:57.774Z" },
++    { url = "https://files.pythonhosted.org/packages/53/6c/288c3f0bd9fcfe9ca41e2c2fbfd17b2097f6af57b62a81161941f09afa76/zstandard-0.25.0-cp312-cp312-manylinux2010_i686.manylinux2014_i686.manylinux_2_12_i686.manylinux_2_17_i686.whl", hash = "sha256:011d388c76b11a0c165374ce660ce2c8efa8e5d87f34996aa80f9c0816698b64", size = 5343019, upload-time = "2025-09-14T22:16:59.302Z" },
++    { url = "https://files.pythonhosted.org/packages/1e/15/efef5a2f204a64bdb5571e6161d49f7ef0fffdbca953a615efbec045f60f/zstandard-0.25.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:6dffecc361d079bb48d7caef5d673c88c8988d3d33fb74ab95b7ee6da42652ea", size = 5063012, upload-time = "2025-09-14T22:17:01.156Z" },
++    { url = "https://files.pythonhosted.org/packages/b7/37/a6ce629ffdb43959e92e87ebdaeebb5ac81c944b6a75c9c47e300f85abdf/zstandard-0.25.0-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:7149623bba7fdf7e7f24312953bcf73cae103db8cae49f8154dd1eadc8a29ecb", size = 5394148, upload-time = "2025-09-14T22:17:03.091Z" },
++    { url = "https://files.pythonhosted.org/packages/e3/79/2bf870b3abeb5c070fe2d670a5a8d1057a8270f125ef7676d29ea900f496/zstandard-0.25.0-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:6a573a35693e03cf1d67799fd01b50ff578515a8aeadd4595d2a7fa9f3ec002a", size = 5451652, upload-time = "2025-09-14T22:17:04.979Z" },
++    { url = "https://files.pythonhosted.org/packages/53/60/7be26e610767316c028a2cbedb9a3beabdbe33e2182c373f71a1c0b88f36/zstandard-0.25.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5a56ba0db2d244117ed744dfa8f6f5b366e14148e00de44723413b2f3938a902", size = 5546993, upload-time = "2025-09-14T22:17:06.781Z" },
++    { url = "https://files.pythonhosted.org/packages/85/c7/3483ad9ff0662623f3648479b0380d2de5510abf00990468c286c6b04017/zstandard-0.25.0-cp312-cp312-musllinux_1_1_aarch64.whl", hash = "sha256:10ef2a79ab8e2974e2075fb984e5b9806c64134810fac21576f0668e7ea19f8f", size = 5046806, upload-time = "2025-09-14T22:17:08.415Z" },
++    { url = "https://files.pythonhosted.org/packages/08/b3/206883dd25b8d1591a1caa44b54c2aad84badccf2f1de9e2d60a446f9a25/zstandard-0.25.0-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:aaf21ba8fb76d102b696781bddaa0954b782536446083ae3fdaa6f16b25a1c4b", size = 5576659, upload-time = "2025-09-14T22:17:10.164Z" },
++    { url = "https://files.pythonhosted.org/packages/9d/31/76c0779101453e6c117b0ff22565865c54f48f8bd807df2b00c2c404b8e0/zstandard-0.25.0-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:1869da9571d5e94a85a5e8d57e4e8807b175c9e4a6294e3b66fa4efb074d90f6", size = 4953933, upload-time = "2025-09-14T22:17:11.857Z" },
++    { url = "https://files.pythonhosted.org/packages/18/e1/97680c664a1bf9a247a280a053d98e251424af51f1b196c6d52f117c9720/zstandard-0.25.0-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:809c5bcb2c67cd0ed81e9229d227d4ca28f82d0f778fc5fea624a9def3963f91", size = 5268008, upload-time = "2025-09-14T22:17:13.627Z" },
++    { url = "https://files.pythonhosted.org/packages/1e/73/316e4010de585ac798e154e88fd81bb16afc5c5cb1a72eeb16dd37e8024a/zstandard-0.25.0-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:f27662e4f7dbf9f9c12391cb37b4c4c3cb90ffbd3b1fb9284dadbbb8935fa708", size = 5433517, upload-time = "2025-09-14T22:17:16.103Z" },
++    { url = "https://files.pythonhosted.org/packages/5b/60/dd0f8cfa8129c5a0ce3ea6b7f70be5b33d2618013a161e1ff26c2b39787c/zstandard-0.25.0-cp312-cp312-musllinux_1_2_s390x.whl", hash = "sha256:99c0c846e6e61718715a3c9437ccc625de26593fea60189567f0118dc9db7512", size = 5814292, upload-time = "2025-09-14T22:17:17.827Z" },
++    { url = "https://files.pythonhosted.org/packages/fc/5f/75aafd4b9d11b5407b641b8e41a57864097663699f23e9ad4dbb91dc6bfe/zstandard-0.25.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:474d2596a2dbc241a556e965fb76002c1ce655445e4e3bf38e5477d413165ffa", size = 5360237, upload-time = "2025-09-14T22:17:19.954Z" },
++    { url = "https://files.pythonhosted.org/packages/35/0b/8df9c4ad06af91d39e94fa96cc010a24ac4ef1378d3efab9223cc8593d40/zstandard-0.25.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:ec996f12524f88e151c339688c3897194821d7f03081ab35d31d1e12ec975e94", size = 795735, upload-time = "2025-09-14T22:17:26.042Z" },
++    { url = "https://files.pythonhosted.org/packages/3f/06/9ae96a3e5dcfd119377ba33d4c42a7d89da1efabd5cb3e366b156c45ff4d/zstandard-0.25.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a1a4ae2dec3993a32247995bdfe367fc3266da832d82f8438c8570f989753de1", size = 640440, upload-time = "2025-09-14T22:17:27.366Z" },
++    { url = "https://files.pythonhosted.org/packages/d9/14/933d27204c2bd404229c69f445862454dcc101cd69ef8c6068f15aaec12c/zstandard-0.25.0-cp313-cp313-manylinux2010_i686.manylinux2014_i686.manylinux_2_12_i686.manylinux_2_17_i686.whl", hash = "sha256:e96594a5537722fdfb79951672a2a63aec5ebfb823e7560586f7484819f2a08f", size = 5343070, upload-time = "2025-09-14T22:17:28.896Z" },
++    { url = "https://files.pythonhosted.org/packages/6d/db/ddb11011826ed7db9d0e485d13df79b58586bfdec56e5c84a928a9a78c1c/zstandard-0.25.0-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:bfc4e20784722098822e3eee42b8e576b379ed72cca4a7cb856ae733e62192ea", size = 5063001, upload-time = "2025-09-14T22:17:31.044Z" },
++    { url = "https://files.pythonhosted.org/packages/db/00/87466ea3f99599d02a5238498b87bf84a6348290c19571051839ca943777/zstandard-0.25.0-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:457ed498fc58cdc12fc48f7950e02740d4f7ae9493dd4ab2168a47c93c31298e", size = 5394120, upload-time = "2025-09-14T22:17:32.711Z" },
++    { url = "https://files.pythonhosted.org/packages/2b/95/fc5531d9c618a679a20ff6c29e2b3ef1d1f4ad66c5e161ae6ff847d102a9/zstandard-0.25.0-cp313-cp313-manylinux2014_s390x.manylinux_2_17_s390x.whl", hash = "sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551", size = 5451230, upload-time = "2025-09-14T22:17:34.41Z" },
++    { url = "https://files.pythonhosted.org/packages/63/4b/e3678b4e776db00f9f7b2fe58e547e8928ef32727d7a1ff01dea010f3f13/zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8e735494da3db08694d26480f1493ad2cf86e99bdd53e8e9771b2752a5c0246a", size = 5547173, upload-time = "2025-09-14T22:17:36.084Z" },
++    { url = "https://files.pythonhosted.org/packages/4e/d5/ba05ed95c6b8ec30bd468dfeab20589f2cf709b5c940483e31d991f2ca58/zstandard-0.25.0-cp313-cp313-musllinux_1_1_aarch64.whl", hash = "sha256:3a39c94ad7866160a4a46d772e43311a743c316942037671beb264e395bdd611", size = 5046736, upload-time = "2025-09-14T22:17:37.891Z" },
++    { url = "https://files.pythonhosted.org/packages/50/d5/870aa06b3a76c73eced65c044b92286a3c4e00554005ff51962deef28e28/zstandard-0.25.0-cp313-cp313-musllinux_1_1_x86_64.whl", hash = "sha256:172de1f06947577d3a3005416977cce6168f2261284c02080e7ad0185faeced3", size = 5576368, upload-time = "2025-09-14T22:17:40.206Z" },
++    { url = "https://files.pythonhosted.org/packages/5d/35/398dc2ffc89d304d59bc12f0fdd931b4ce455bddf7038a0a67733a25f550/zstandard-0.25.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:3c83b0188c852a47cd13ef3bf9209fb0a77fa5374958b8c53aaa699398c6bd7b", size = 4954022, upload-time = "2025-09-14T22:17:41.879Z" },
++    { url = "https://files.pythonhosted.org/packages/9a/5c/36ba1e5507d56d2213202ec2b05e8541734af5f2ce378c5d1ceaf4d88dc4/zstandard-0.25.0-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:1673b7199bbe763365b81a4f3252b8e80f44c9e323fc42940dc8843bfeaf9851", size = 5267889, upload-time = "2025-09-14T22:17:43.577Z" },
++    { url = "https://files.pythonhosted.org/packages/70/e8/2ec6b6fb7358b2ec0113ae202647ca7c0e9d15b61c005ae5225ad0995df5/zstandard-0.25.0-cp313-cp313-musllinux_1_2_ppc64le.whl", hash = "sha256:0be7622c37c183406f3dbf0cba104118eb16a4ea7359eeb5752f0794882fc250", size = 5433952, upload-time = "2025-09-14T22:17:45.271Z" },
++    { url = "https://files.pythonhosted.org/packages/7b/01/b5f4d4dbc59ef193e870495c6f1275f5b2928e01ff5a81fecb22a06e22fb/zstandard-0.25.0-cp313-cp313-musllinux_1_2_s390x.whl", hash = "sha256:5f5e4c2a23ca271c218ac025bd7d635597048b366d6f31f420aaeb715239fc98", size = 5814054, upload-time = "2025-09-14T22:17:47.08Z" },
++    { url = "https://files.pythonhosted.org/packages/b2/e5/fbd822d5c6f427cf158316d012c5a12f233473c2f9c5fe5ab1ae5d21f3d8/zstandard-0.25.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:4f187a0bb61b35119d1926aee039524d1f93aaf38a9916b8c4b78ac8514a0aaf", size = 5360113, upload-time = "2025-09-14T22:17:48.893Z" },
++]
+-- 
+2.43.0
+
