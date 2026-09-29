@@ -135,6 +135,7 @@
       <dt data-t="Grafikkarte"></dt><dd id="i-gpu"></dd>
       <dt data-t="Arbeitsweise"></dt><dd id="i-modell"></dd>
       <dt data-t="Gemessen"></dt><dd id="i-messung"></dd>
+      <dt data-t="Recaps"></dt><dd id="i-recaps"></dd>
       <dt data-t="Fassung"></dt><dd id="i-fassung"></dd>
     </dl>
   </div>
@@ -149,6 +150,9 @@
       <label class="schalter"><input type="checkbox" data-einstellung="im_hintergrund"><span></span></label></div>
     <div class="zeile"><div class="zeile__text"><strong data-t="update_titel"></strong><span data-t="update_text"></span></div>
       <label class="schalter"><input type="checkbox" data-einstellung="auto_update"><span></span></label></div>
+    <div class="zeile" id="zeile-recaps"><div class="zeile__text"><strong data-t="recaps_titel"></strong><span data-t="recaps_text"></span>
+        <span class="leise" id="ollama-stand" aria-live="polite"></span></div>
+      <label class="schalter"><input type="checkbox" data-einstellung="recaps_lokal"><span></span></label></div>
     <div class="regler" data-regler hidden>
         <div class="regler__kopf"><div class="zeile__text"><strong data-t="regler_titel"></strong><span data-t="regler_text"></span></div>
           <output class="regler__wert" data-regler-wert></output></div>
@@ -171,7 +175,8 @@
     <h2 data-t="Speicherplatz"></h2>
     <p class="leise" id="speicher"></p>
     <div class="knopfreihe"><button class="tw-btn tw-btn--secondary" id="ordner" data-t="Ordner öffnen"></button>
-      <button class="tw-btn tw-btn--secondary" id="verwaltung" data-t="Verwaltung öffnen"></button></div>
+      <button class="tw-btn tw-btn--secondary" id="verwaltung" data-t="Verwaltung öffnen"></button>
+      <button class="tw-btn tw-btn--secondary" id="ollama-entfernen" data-t="ollama_entfernen" hidden></button></div>
   </div>
   <div class="karte gefahr">
     <h2 data-t="Verbindung und KI-Paket"></h2>

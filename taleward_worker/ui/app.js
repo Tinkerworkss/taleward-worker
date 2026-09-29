@@ -233,6 +233,8 @@
       if (m.peakMb) mt += " · " + t("messung_peak", { gb: gb(m.peakMb) });
     }
     $("#i-messung").textContent = mt;
+    const o = S.ollama || {};
+    $("#i-recaps").textContent = o.an && o.sprachmodell ? t("recaps_lokal", { modell: o.sprachmodell }) : t("recaps_server");
     $("#i-fassung").textContent = t("fassung_text", { app: S.version, motor: S.motor ? S.motor.fassung || S.motor.ref : "–" });
     // Hinweise
     const inst = S.installation;
@@ -307,13 +309,32 @@
     $("#fuss-version").textContent = "Taleward Worker " + S.version;
     const k = S.hardware && S.hardware.grafikkarte;
     $("#zeile-prozessor").hidden = !(k && S.hardware.grafikkarteNutzbar) || S.einstellungen.testmodus;
+    $("#zeile-recaps").hidden = !!S.einstellungen.testmodus;
+    ollamaZeigen();
     if (document.activeElement !== $("#nur-prozessor")) $("#nur-prozessor").checked = S.einstellungen.geraet === "cpu";
     reglerZeigen();
   }
 
+  function ollamaZeigen() {
+    const o = S.ollama || {};
+    const inst = o.installation;
+    let text = "";
+    if (inst && inst.phase === "laden") text = t("ollama_laedt", { p: Math.round(inst.anteil * 100) + " %" });
+    else if (inst && inst.phase === "entpacken") text = t("ollama_entpackt");
+    else if (inst && inst.phase === "fehler") text = t("ollama_fehler", { text: inst.fehler });
+    else if (o.an && o.fremd) text = t("ollama_fremd");
+    else if (o.an && o.laeuft) text = o.sprachmodell ? t("ollama_bereit_modell", { modell: o.sprachmodell }) : t("ollama_bereit");
+    else if (o.an && o.installiert) text = t("ollama_startet");
+    $("#ollama-stand").textContent = text;
+    $("#ollama-stand").hidden = !text;
+    $("#ollama-entfernen").hidden = !o.installiert;
+  }
+
   async function speicherLaden() {
     const s = await api.speicherbelegung();
-    $("#speicher").textContent = t("speicher_text", { motor: gb(s.motorMb), modelle: gb(s.modelleMb) });
+    let text = t("speicher_text", { motor: gb(s.motorMb), modelle: gb(s.modelleMb) });
+    if (s.ollamaMb) text += " " + t("speicher_ollama", { mb: gb(s.ollamaMb) });
+    $("#speicher").textContent = text;
   }
 
   async function logLaden(ganz) {
@@ -410,6 +431,7 @@
     $("#ordner").onclick = () => api.ordner_oeffnen();
     $("#log-ordner").onclick = () => api.ordner_oeffnen();
     $("#verwaltung").onclick = () => api.verwaltung_oeffnen();
+    $("#ollama-entfernen").onclick = async () => { if (confirm(t("bestaetigen_ollama"))) { await api.ollama_entfernen(); speicherLaden(); neuLaden(); } };
     $("#neu-koppeln").onclick = async () => { if (confirm(t("bestaetigen_koppeln"))) { await api.entkoppeln(); reiter = "status"; neuLaden(); } };
     $("#neu-installieren").onclick = async () => { await api.installieren(!!S.einstellungen.testmodus); reiter = "status"; zeigeReiter("status"); neuLaden(); };
     $("#entfernen").onclick = async () => { if (confirm(t("bestaetigen_entfernen"))) { await api.ki_entfernen(true); schritt = 2; reiter = "status"; neuLaden(); } };

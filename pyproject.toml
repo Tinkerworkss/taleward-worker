@@ -10,6 +10,7 @@ dependencies = [
     "pillow>=10",
     "httpx>=0.27",
     "platformdirs>=4",
+    "zstandard>=0.22; sys_platform != 'win32'",  # Ollama für Linux kommt als .tar.zst
 ]
 
 [project.optional-dependencies]

@@ -23,6 +23,13 @@ freigegeben werden.
   - 2 bis 3,5 GB: Ausrichtung und Sprechertrennung laufen auf dem Prozessor.
   - Ohne nutzbare NVIDIA-Karte: alles auf dem Prozessor. Das ist langsam, grob 4–10 Stunden für 4 Stunden Aufnahme, und installiert eine kleinere Prozessor-Fassung des KI-Pakets.
 - **Schieberegler „Grafikspeicher für Taleward“:** Er legt fest, wie viel Grafikspeicher der Worker höchstens nutzt, der Rest bleibt für Spiele. Die App passt das Modell daran an und begrenzt PyTorch auf diesen Anteil. Nach jedem Auftrag zeigt sie Dauer und höchsten Grafikspeicher als gemessene Werte an. Die Zeiten vorher sind grobe Schätzungen.
+- **Recaps auch hier schreiben** (Einstellungen, freiwillig):
+  - Die App richtet Ollama mit einem lokalen Sprachmodell ein: etwa 1,4 GB Programm, beim ersten Recap etwa 5 GB
+    Sprachmodell.
+  - Ollama kommt in fester, geprüfter Fassung, ohne Administratorrechte, in den eigenen Datenordner.
+  - Ist auf dem PC schon ein Ollama installiert, nutzt die App dieses.
+  - Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.
+  - Transkription und Recap wechseln sich auf der Grafikkarte ab.
 - Während eines Auftrags geht der PC nicht in den Ruhezustand.
 - Die Aufnahmen werden nur im Arbeitsordner verarbeitet und danach gelöscht.
 

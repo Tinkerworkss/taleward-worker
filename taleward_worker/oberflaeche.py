@@ -10,7 +10,7 @@ import threading
 import time
 import webbrowser
 
-from taleward_worker import VERSION, autostart, hardware, motor, pfade, selbstupdate, server
+from taleward_worker import VERSION, autostart, hardware, motor, ollama, pfade, selbstupdate, server
 from taleward_worker.dienst import Dienst
 from taleward_worker.einstellungen import Einstellungen
 
@@ -36,6 +36,7 @@ class Api:
             "hardware": a.hardware, "serverVersion": a.server_version, "serverName": a.server_name,
             "appUpdate": a.app_update.stand() if a.app_update else None, "trayVorhanden": a.tray is not None,
             "entwicklung": bool(os.environ.get("TALEWARD_MOTOR")),
+            "ollama": a.ollama_stand(),
         }
 
     def hardware_pruefen(self) -> dict:
@@ -108,6 +109,13 @@ class Api:
             a.e.im_hintergrund = bool(wert)
         elif name == "auto_update":
             a.e.auto_update = bool(wert)
+        elif name == "recaps_lokal":
+            a.e.recaps_lokal = bool(wert)
+            a.e.speichern()
+            if a.e.recaps_lokal and not ollama.installiert() and not ollama.antwortet(ollama.FREMDE_ADRESSE):
+                a.ollama_installieren()
+            else:
+                a.dienst.neu_starten_wenn_frei()
         elif name == "modell" and wert in ("auto", "large-v3", "large-v3-turbo"):
             a.e.modell = wert
             a.e.speichern()
@@ -151,10 +159,20 @@ class Api:
         self._app.e.motor_fassung = ""
         self._app.e.speichern()
 
+    def ollama_entfernen(self) -> None:
+        a = self._app
+        a.e.recaps_lokal = False
+        a.e.speichern()
+        if a.ollama_installation:
+            a.ollama_installation.abbrechen()
+        a.dienst.ollama.entfernen()
+        a.dienst.neu_starten_wenn_frei()
+
     def speicherbelegung(self) -> dict:
         def mb(p):
             return pfade.ordnergroesse(p) // 2 ** 20 if p.exists() else 0
         return {"motorMb": mb(pfade.motor()) + mb(pfade.basis() / "python"), "modelleMb": mb(pfade.modelle()),
+                "ollamaMb": mb(ollama.ordner()) + mb(ollama.modellordner()),
                 "ordner": str(pfade.basis())}
 
     def protokoll(self) -> list[str]:
@@ -190,6 +208,8 @@ class WorkerApp:
         self.e = Einstellungen.laden()
         self.dienst = Dienst(self.e)
         self.installation: motor.Installation | None = None
+        self.ollama_installation: ollama.Installation | None = None
+        self._fremd_geprueft: tuple[float, bool] = (0.0, False)
         self.hardware: dict | None = None
         self.server_version: str | None = None
         self.server_name: str | None = None
@@ -221,6 +241,30 @@ class WorkerApp:
         if not self.e.testmodus and self.e.geraet != "cpu" and inst.get("backend") == "cpu":
             return False  # Grafikkarte gewünscht, installiert ist nur die Prozessor-Fassung
         return not self.server_version or inst.get("fassung") == self.server_version
+
+    # -- Ollama (lokale Recaps)
+    def ollama_installieren(self) -> None:
+        if self.ollama_installation and self.ollama_installation.phase in ("laden", "entpacken"):
+            return
+        self.ollama_installation = ollama.Installation()
+        faden = self.ollama_installation.starten()
+
+        def danach():
+            faden.join()
+            if self.ollama_installation.phase == "fertig":
+                self.dienst.neu_starten_wenn_frei()
+        threading.Thread(target=danach, daemon=True).start()
+
+    def ollama_stand(self) -> dict:
+        jetzt = time.monotonic()
+        if jetzt - self._fremd_geprueft[0] > 10:  # die Oberfläche fragt oft – das fremde Ollama selten prüfen
+            self._fremd_geprueft = (jetzt, ollama.antwortet(ollama.FREMDE_ADRESSE, 0.5)
+                                    if not self.dienst.ollama.laeuft() else False)
+        inst = self.ollama_installation
+        return {"an": self.e.recaps_lokal, "installiert": ollama.installiert(), "laeuft": self.dienst.ollama.laeuft(),
+                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG,
+                "installation": inst.stand() if inst and inst.phase != "fertig" else None,
+                "sprachmodell": self.dienst.info.get("llm")}
 
     def installieren(self, testmodus: bool) -> None:
         if self.installation and self.installation.phase not in ("fertig", "fehler", "abgebrochen"):
@@ -325,6 +369,7 @@ class WorkerApp:
     def beenden(self) -> None:
         self._beendet.set()
         self.dienst.stoppen()
+        self.dienst.ollama.stoppen()
         if self.tray is not None:
             try:
                 self.tray.stop()

@@ -23,6 +23,7 @@ class Einstellungen:
     autostart: bool = False
     im_hintergrund: bool = True     # Fenster schließen = weiterlaufen (Symbol im Infobereich)
     auto_update: bool = True        # neue Fassungen der App selbst installieren, sobald der Worker frei ist
+    recaps_lokal: bool = False      # Recaps auch hier schreiben (Ollama auf diesem PC)
     pausiert: bool = False
     motor_fassung: str = ""         # installierte Fassung des KI-Pakets (= Serverfassung)
     motor_art: str = ""             # "ki" oder "test"

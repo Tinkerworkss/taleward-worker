@@ -117,6 +117,9 @@ class Dienst:
         self.protokoll = Protokoll()
         self.statistik = Statistik()
         self.wach = Wachhalten()
+        from taleward_worker.ollama import OllamaDienst
+
+        self.ollama = OllamaDienst()
         self._prozess: subprocess.Popen | None = None
         self._sperre = threading.RLock()
         self._soll_laufen = False
@@ -205,10 +208,22 @@ class Dienst:
             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
             "PATH": str(pfade.werkzeuge()) + os.pathsep + env.get("PATH", ""),
+            # Recaps mit Ollama: eigenes/vorhandenes Ollama oder bewusst keins (sonst fände der Worker ein fremdes)
+            "WORKER_LLM_URL": self._ollama_adresse(),
         })
         for schluessel in ("VIRTUAL_ENV", "HF_TOKEN", "DATABASE_URL"):
             env.pop(schluessel, None)
         return env
+
+    def _ollama_adresse(self) -> str:
+        from taleward_worker.ollama import AUS
+
+        if self.e.testmodus:
+            return AUS
+        adresse = self.ollama.adresse(self.e.recaps_lokal)
+        if adresse != self.ollama.eigene_adresse:
+            self.ollama.stoppen()  # abgeschaltet oder ein anderes Ollama übernimmt
+        return adresse
 
     def _motor_starten(self) -> None:
         befehl = self._motor_befehl()
