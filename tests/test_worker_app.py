@@ -99,6 +99,8 @@ for zeile in sys.stdin:
     b = zeile.strip()
     if b == "pause": m("pausiert")
     elif b == "weiter": m("fortgesetzt")
+    elif b == "server-pause": m("server_pausiert")
+    elif b == "server-weiter": m("server_fortgesetzt")
     elif b == "stopp": break
 m("beendet")
 '''
@@ -127,6 +129,16 @@ def test_dienst_verarbeitet_ereignisse(tmp_path):
     assert _warten(lambda: d.zustand["art"] == "pausiert")
     d.pausieren(False)
     assert _warten(lambda: d.zustand["art"] == "warte")
+    # In der Verwaltung pausiert (der Schein-Motor spielt die Meldung des Servers nach)
+    d._senden("server-pause")
+    assert _warten(lambda: d.zustand["art"] == "server_pausiert")
+    d.pausieren(True)  # eigene Pause geht vor
+    assert _warten(lambda: d.zustand["art"] == "pausiert")
+    d.pausieren(False)
+    assert _warten(lambda: d.zustand["art"] == "server_pausiert")
+    d._senden("server-weiter")
+    assert _warten(lambda: d.zustand["art"] == "warte")
+    assert any("In der Verwaltung des Servers pausiert" in z for z in d.protokoll.zeilen)
     d.stoppen()
     assert d.zustand["art"] == "gestoppt" and not d.laeuft()
 

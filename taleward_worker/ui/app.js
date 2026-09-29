@@ -277,7 +277,7 @@
   function knoepfe(art) {
     const ziel = $("#status-knoepfe");
     const liste = [];
-    if (["warte", "arbeitet", "getrennt", "startet"].includes(art)) liste.push(["Pausieren", "secondary", () => api.pausieren(true)]);
+    if (["warte", "arbeitet", "getrennt", "startet", "server_pausiert"].includes(art)) liste.push(["Pausieren", "secondary", () => api.pausieren(true)]);
     if (art === "pausiert") liste.push(["Fortsetzen", "primary", () => api.pausieren(false)]);
     if (art === "gestoppt") liste.push(["Starten", "primary", () => api.starten()]);
     if (art === "fehler" || art === "abgestuerzt") {

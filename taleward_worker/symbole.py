@@ -13,6 +13,7 @@ FARBEN = {
     "startet": "#c49235",
     "abgestuerzt": "#c49235",
     "pausiert": "#8A7654",
+    "server_pausiert": "#8A7654",
     "gestoppt": "#8A7654",
     "getrennt": "#9e2a3a",   # Siegel: braucht Aufmerksamkeit
     "fehler": "#9e2a3a",

@@ -128,6 +128,7 @@ class Dienst:
         self._neustart_offen = False  # Einstellung geändert: nach dem laufenden Auftrag neu starten
         self.zustand: dict = {"art": "gestoppt"}
         self.info: dict = {}
+        self.server_pausiert = False  # in der Verwaltung des Servers pausiert (vom Worker gemeldet)
         self._waechter = threading.Thread(target=self._wachen, daemon=True, name="dienst-waechter")
         self._waechter.start()
 
@@ -320,7 +321,7 @@ class Dienst:
             if self._neustart_offen:
                 self._neustart_offen = False
                 threading.Thread(target=self.neu_starten, daemon=True).start()
-            self._setzen("pausiert" if self.e.pausiert else "warte")
+            self._setzen(self._ruhezustand())
         elif art == "auftrag":
             self.wach.an()
             self._setzen("arbeitet", jobId=e.get("jobId"), typ=e.get("typ"), p=0.0)
@@ -344,12 +345,28 @@ class Dienst:
                 self._setzen("pausiert")
         elif art == "fortgesetzt":
             if self.zustand["art"] == "pausiert":
-                self._setzen("warte")
+                self._setzen(self._ruhezustand())
+        elif art == "server_pausiert":  # in der Verwaltung des Servers pausiert
+            self.server_pausiert = True
+            self.protokoll.schreiben("In der Verwaltung des Servers pausiert")
+            if self.zustand["art"] in ("warte", "getrennt"):
+                self._setzen("server_pausiert")
+        elif art == "server_fortgesetzt":
+            self.server_pausiert = False
+            self.protokoll.schreiben("In der Verwaltung des Servers fortgesetzt")
+            if self.zustand["art"] == "server_pausiert":
+                self._setzen(self._ruhezustand())
         elif art == "abgelehnt":
             self._setzen("abgelehnt")
         elif art == "fehler":
             self._setzen("fehler", code="einrichtung", text=e.get("message", ""))
             self.protokoll.schreiben(f"Fehler: {e.get('message')}")
+
+    def _ruhezustand(self) -> str:
+        """Zustand ohne Auftrag: eigene Pause vor der des Servers, sonst bereit."""
+        if self.e.pausiert:
+            return "pausiert"
+        return "server_pausiert" if self.server_pausiert else "warte"
 
     def fuer_oberflaeche(self) -> dict:
         return {"zustand": self.zustand, "info": self.info, "statistik": self.statistik.fuer_oberflaeche(),

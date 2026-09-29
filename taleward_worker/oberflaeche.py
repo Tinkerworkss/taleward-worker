@@ -488,6 +488,7 @@ def tray_titel(d: dict, sprache: str) -> str:
         "warte": ("Bereit – wartet auf Aufnahmen", "Ready – waiting for recordings"),
         "arbeitet": (f"Arbeitet … {round((z.get('p') or 0) * 100)} %", f"Working … {round((z.get('p') or 0) * 100)}%"),
         "pausiert": ("Pausiert", "Paused"),
+        "server_pausiert": ("Auf dem Server pausiert", "Paused on the server"),
         "getrennt": ("Keine Verbindung zum Server", "No connection to the server"),
         "startet": ("Startet …", "Starting …"),
         "fehler": ("Braucht deine Hilfe", "Needs your attention"),
