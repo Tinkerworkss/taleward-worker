@@ -1,0 +1,97 @@
+From 050e9adc26cb21c63eef8615395968ac03a42bef Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 29 Sep 2026 22:31:00 +0200
+Subject: [PATCH] KI-Paket zieht kurz nach einem Server-Update nach, keine
+ HF-Warnungen im Protokoll
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Die App fragt die Serverfassung alle 5 Minuten statt nur beim Start und alle
+  6 Stunden ab und aktualisiert das KI-Paket, sobald kein Auftrag läuft.
+- HF_HUB_DISABLE_SYMLINKS_WARNING und HF_HUB_DISABLE_XET für den Worker.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ taleward_worker/dienst.py      |  2 ++
+ taleward_worker/oberflaeche.py | 41 ++++++++++++++++++++--------------
+ 2 files changed, 26 insertions(+), 17 deletions(-)
+
+diff --git a/taleward_worker/dienst.py b/taleward_worker/dienst.py
+index b7a28bf..f591f3d 100644
+--- a/taleward_worker/dienst.py
++++ b/taleward_worker/dienst.py
+@@ -207,6 +207,8 @@ class Dienst:
+             "DATA_DIR": str(pfade.basis() / "motor-daten"),
+             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
+             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
++            # Modelle kommen per HTTP; ohne Symlinks (Windows) nur etwas mehr Platz – keine Warnungen ins Protokoll
++            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1", "HF_HUB_DISABLE_XET": "1",
+             "PATH": str(pfade.werkzeuge()) + os.pathsep + env.get("PATH", ""),
+             # Recaps mit Ollama: eigenes/vorhandenes Ollama oder bewusst keins (sonst fände der Worker ein fremdes)
+             "WORKER_LLM_URL": self._ollama_adresse(),
+diff --git a/taleward_worker/oberflaeche.py b/taleward_worker/oberflaeche.py
+index 2dfaa9d..32c4e1d 100644
+--- a/taleward_worker/oberflaeche.py
++++ b/taleward_worker/oberflaeche.py
+@@ -290,32 +290,39 @@ class WorkerApp:
+                                                vor_tausch=vor, nach_tausch=nach)
+         self.installation.starten()
+ 
++    def _motor_pruefen(self, erster: bool) -> None:
++        """Serverfassung abfragen; passt das KI-Paket nicht mehr, im Hintergrund nachziehen (nur ohne Auftrag)."""
++        self.fassung_abfragen()
++        if not self.e.gekoppelt:
++            return
++        if self.motor_passt():
++            if erster and not self.dienst.laeuft():
++                self.dienst.starten()
++        elif motor.installiert() or os.environ.get("TALEWARD_MOTOR"):
++            # Neue Serverfassung: Motor im Hintergrund aktualisieren (alter läuft bis zum Tausch weiter)
++            if erster and not self.dienst.laeuft():
++                self.dienst.starten()
++            laeuft_installation = self.installation and self.installation.phase not in ("fertig", "fehler",
++                                                                                         "abgebrochen")
++            if self.dienst.zustand.get("art") != "arbeitet" and not laeuft_installation:
++                self.installieren(self.e.testmodus)
++
+     def _hintergrund_pflege(self) -> None:
+-        """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 6 Stunden."""
++        """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 5 Minuten die
++        Serverfassung (ein kleiner Abruf – so zieht das KI-Paket kurz nach einem Server-Update nach) und alle
++        6 Stunden, ob es eine neue App gibt."""
+         naechste_app_pruefung = 0.0
+         erster = True
+         while not self._beendet.is_set():
+-            self.fassung_abfragen()
+-            if self.e.gekoppelt:
+-                if self.motor_passt():
+-                    if erster and not self.dienst.laeuft():
+-                        self.dienst.starten()
+-                elif motor.installiert() or os.environ.get("TALEWARD_MOTOR"):
+-                    # Neue Serverfassung: Motor im Hintergrund aktualisieren (alter läuft bis zum Tausch weiter)
+-                    if erster and not self.dienst.laeuft():
+-                        self.dienst.starten()
+-                    if self.dienst.zustand.get("art") != "arbeitet":
+-                        self.installieren(self.e.testmodus)
++            self._motor_pruefen(erster)
+             if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
+                 self.app_update_pruefen()
+                 naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE
+             erster = False
+             self.tray_aktualisieren()
+-            # Alle 5 Minuten schauen, ob ein anstehendes App-Update jetzt installiert werden kann
+-            for _ in range(UPDATE_PRUEFEN_ALLE // 300):
+-                if self._beendet.wait(300):
+-                    return
+-                self.app_update_wenn_frei()
++            if self._beendet.wait(300):
++                return
++            self.app_update_wenn_frei()
+ 
+     # ------------------------------------------------------------------ Selbst-Update der App
+     def app_update_pruefen(self) -> None:
+-- 
+2.43.0
+
