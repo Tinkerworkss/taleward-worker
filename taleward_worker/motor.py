@@ -24,7 +24,7 @@ from pathlib import Path
 
 import httpx
 
-from taleward_worker import REPO, VERSION, pfade
+from taleward_worker import REPO, VERSION, pfade, prozesse
 
 # Ungefähre Downloadgröße (für die Fortschrittsanzeige; gemessen an der Größe des Zwischenspeichers)
 # Größe des installierten KI-Pakets in MB (gemessen: Windows mit CUDA 7,7 GB, Stand 0.4.4). Der Fortschritt zählt,
@@ -111,8 +111,7 @@ class Installation:
 
     def abbrechen(self) -> None:
         self._abbrechen.set()
-        if self._prozess and self._prozess.poll() is None:
-            self._prozess.kill()
+        prozesse.beenden(self._prozess, sanft=False)
 
     # ------------------------------------------------------------------ Ablauf
     def starten(self) -> threading.Thread:
@@ -156,6 +155,7 @@ class Installation:
         self._prozess = subprocess.Popen(befehl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                          encoding="utf-8", errors="replace", env=self._umgebung(),
                                          cwd=pfade.basis(), **_ohne_fenster())
+        prozesse.zuordnen(self._prozess)
         lesen = threading.Thread(target=self._mitlesen, args=(self._prozess,), daemon=True)
         lesen.start()
         while self._prozess.poll() is None:

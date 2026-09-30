@@ -74,7 +74,19 @@ def koppeln(adresse: str, code: str, name: str) -> dict:
             raise ServerFehler(d.get("code", "koppeln_fehlgeschlagen"), d.get("message", ""))
         except ValueError:
             raise ServerFehler("koppeln_fehlgeschlagen", r.text[:200]) from None
-    return r.json()
+    return _json(r)
+
+
+def _json(r: httpx.Response) -> dict:
+    """Eine 200-Antwort ohne JSON (Hotel-Anmeldeseite, Proxy-Sperrseite, falsch gesetzter Reverse-Proxy) ist kein
+    Taleward-Server – und kein Grund, den Hintergrund-Thread der App sterben zu lassen."""
+    try:
+        d = r.json()
+    except ValueError:
+        raise ServerFehler("kein_taleward") from None
+    if not isinstance(d, dict):
+        raise ServerFehler("kein_taleward")
+    return d
 
 
 def konfiguration(adresse: str, token: str) -> dict:
@@ -88,4 +100,4 @@ def konfiguration(adresse: str, token: str) -> dict:
         raise ServerFehler("abgelehnt")
     if r.status_code != 200:
         raise ServerFehler("kein_taleward")
-    return r.json()
+    return _json(r)

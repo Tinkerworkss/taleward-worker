@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-from taleward_worker import pfade
+from taleward_worker import pfade, prozesse
 
 FASSUNG = "0.34.4"
 QUELLE = f"https://github.com/ollama/ollama/releases/download/v{FASSUNG}"
@@ -203,14 +203,14 @@ class OllamaDienst:
             env = {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{EIGENER_PORT}", "OLLAMA_MODELS": str(modellordner()),
                    "OLLAMA_KEEP_ALIVE": "2m", "OLLAMA_MAX_LOADED_MODELS": "1"}
             log = open(pfade.protokolle() / "ollama.log", "ab")
-            extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {"start_new_session": True}
             try:
                 self._prozess = subprocess.Popen([str(p), "serve"], stdout=log, stderr=subprocess.STDOUT, env=env,
-                                                 cwd=str(p.parent), **extra)
+                                                 cwd=str(p.parent), **prozesse.start_argumente())
             except OSError:
                 return False
             finally:
                 log.close()
+            prozesse.zuordnen(self._prozess)  # Ollama startet Runner-Kinder mit Gigabytes Grafikspeicher
         ende = time.monotonic() + warten_s
         while time.monotonic() < ende:
             if antwortet(self.eigene_adresse, 1.0):
@@ -221,13 +221,7 @@ class OllamaDienst:
         return False
 
     def stoppen(self) -> None:
-        p = self._prozess
-        if p and p.poll() is None:
-            p.terminate()
-            try:
-                p.wait(10)
-            except subprocess.TimeoutExpired:
-                p.kill()
+        prozesse.beenden(self._prozess, warten=10)
         self._prozess = None
 
     def entfernen(self) -> None:

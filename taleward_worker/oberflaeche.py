@@ -319,15 +319,22 @@ class WorkerApp:
         naechste_app_pruefung = 0.0
         erster = True
         while not self._beendet.is_set():
-            self._motor_pruefen(erster)
-            if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
-                self.app_update_pruefen()
-                naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE
-            erster = False
-            self.tray_aktualisieren()
+            try:
+                self._motor_pruefen(erster)
+                if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
+                    self.app_update_pruefen()
+                    naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE
+                erster = False
+                self.tray_aktualisieren()
+            except Exception as e:  # nie sterben – sonst startet der Worker nie und niemand erfährt warum
+                self.dienst.protokoll.schreiben(f"Fehler in der Hintergrundpflege: {type(e).__name__}: {e}")
+                log.exception("Hintergrundpflege")
             if self._beendet.wait(300):
                 return
-            self.app_update_wenn_frei()
+            try:
+                self.app_update_wenn_frei()
+            except Exception as e:
+                self.dienst.protokoll.schreiben(f"Fehler beim App-Update: {type(e).__name__}: {e}")
 
     # ------------------------------------------------------------------ Selbst-Update der App
     def app_update_pruefen(self) -> None:

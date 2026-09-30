@@ -15,7 +15,7 @@ import time
 from collections import deque
 from datetime import date
 
-from taleward_worker import hardware, motor, pfade
+from taleward_worker import hardware, motor, pfade, prozesse
 from taleward_worker.einstellungen import Einstellungen
 
 VORSILBE = "@@taleward "
@@ -151,7 +151,7 @@ class Dienst:
             try:
                 p.wait(warten)
             except subprocess.TimeoutExpired:
-                p.kill()
+                prozesse.beenden(p, sanft=False)  # samt Python und ffmpeg – sonst bleiben DLLs offen
         self.wach.aus()
         self._setzen("gestoppt")
 
@@ -255,15 +255,16 @@ class Dienst:
                 pass
         self.protokoll.schreiben("Worker startet …")
         self._setzen("startet")
-        extra = {"creationflags": 0x08000000} if sys.platform == "win32" else {"start_new_session": True}
         try:
             self._prozess = subprocess.Popen(befehl, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                                             bufsize=1, env=self._motor_umgebung(), cwd=pfade.basis(), **extra)
+                                             bufsize=1, env=self._motor_umgebung(), cwd=pfade.basis(),
+                                             **prozesse.start_argumente())
         except OSError as e:
             self._setzen("fehler", code="start_fehlgeschlagen", text=str(e))
             self._soll_laufen = False
             return
+        prozesse.zuordnen(self._prozess)  # stirbt die App, stirbt der ganze Baum (Python, ffmpeg …) mit
         threading.Thread(target=self._lesen, args=(self._prozess,), daemon=True, name="motor-ausgabe").start()
         if self.e.pausiert:
             self._senden("pause")
@@ -321,13 +322,19 @@ class Dienst:
     def _wachen(self) -> None:
         while True:
             time.sleep(1)
-            with self._sperre:
-                if self._soll_laufen and self._neustart_um and time.monotonic() >= self._neustart_um:
-                    self._neustart_um = None
-                    self._motor_starten()
-            if self.zustand["art"] == "startet" and self.laeuft():
-                groesse = pfade.ordnergroesse(pfade.modelle()) if pfade.modelle().exists() else 0
-                self.zustand["modelleMb"] = groesse // 2 ** 20
+            try:
+                self._wachen_schritt()
+            except Exception as e:  # der Wächter darf nie sterben – sonst hieße es ewig „Startet neu …“
+                self.protokoll.schreiben(f"Fehler im Wächter: {type(e).__name__}: {e}")
+
+    def _wachen_schritt(self) -> None:
+        with self._sperre:
+            if self._soll_laufen and self._neustart_um and time.monotonic() >= self._neustart_um:
+                self._neustart_um = None
+                self._motor_starten()
+        if self.zustand["art"] == "startet" and self.laeuft():
+            groesse = pfade.ordnergroesse(pfade.modelle()) if pfade.modelle().exists() else 0
+            self.zustand["modelleMb"] = groesse // 2 ** 20
 
     # ------------------------------------------------------------------ Ereignisse des Motors
     def _setzen(self, art: str, **daten) -> None:
