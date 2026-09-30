@@ -202,6 +202,7 @@
     let fortschritt = null;
     if (art === "arbeitet") {
       text = t("st_" + (z.typ || "transcribe"));
+      if (z.taetigkeit) text += " – " + z.taetigkeit.replace(/ …$/, "");
       fortschritt = z.p || 0;
     } else if (art === "startet" && z.modelle) {
       text = t("st_modelle_text", { mb: gb(z.modelleMb || 0) });

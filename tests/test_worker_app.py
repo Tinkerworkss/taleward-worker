@@ -94,7 +94,8 @@ print("12:00:00 Worker bereit", flush=True)
 m("pruefe"); m("bereit", gpu="Test-GPU", modell="large-v3"); m("warte")
 m("auftrag", jobId="j1", typ="transcribe", dateien=2)
 for p in (0.2, 0.6, 1.0): m("fortschritt", jobId="j1", p=p)
-m("fertig", jobId="j1", sekunden=90); m("warte")
+m("taetigkeit", jobId="j1", text="Transkription läuft (47 min Audio) …", schritt="transkription")
+m("fertig", jobId="j1", sekunden=90, audioSekunden=2820); m("warte")
 for zeile in sys.stdin:
     b = zeile.strip()
     if b == "pause": m("pausiert")
@@ -123,7 +124,8 @@ def test_dienst_verarbeitet_ereignisse(tmp_path):
     d.starten()
     assert _warten(lambda: d.statistik.fuer_oberflaeche()["heute"] == 1 and d.zustand["art"] == "warte")
     assert d.info["gpu"] == "Test-GPU"
-    assert any("Auftrag fertig" in z for z in d.protokoll.zeilen)
+    assert any("Auftrag fertig nach 1,5 min (47 min Audio, 31,3× Echtzeit)" in z for z in d.protokoll.zeilen)
+    assert any("Transkription läuft (47 min Audio)" in z for z in d.protokoll.zeilen)
     assert any(z.endswith("Worker bereit") and "12:00:00" not in z for z in d.protokoll.zeilen)
     d.pausieren(True)
     assert _warten(lambda: d.zustand["art"] == "pausiert")
@@ -396,3 +398,11 @@ def test_groesste_karte_und_alter_treiber(monkeypatch):
 
 def test_sechs_gb_karte_kleinerer_stapel():
     assert hardware.modell_fuer(6144) == {"modell": "large-v3", "batch": 4}
+
+
+def test_fertig_text():
+    from taleward_worker.dienst import fertig_text
+
+    assert fertig_text({"sekunden": 492, "audioSekunden": 2820}) == "Auftrag fertig nach 8,2 min (47 min Audio, 5,7× Echtzeit)"
+    assert fertig_text({"sekunden": 300, "tokenS": 14.8}) == "Auftrag fertig nach 5,0 min (14,8 Token/s)"
+    assert fertig_text({"sekunden": 60}) == "Auftrag fertig nach 1,0 min"

@@ -110,6 +110,19 @@ class Protokoll:
                 pass
 
 
+def fertig_text(e: dict) -> str:
+    """„Auftrag fertig nach 8,2 min (47 min Audio, 5,7× Echtzeit)“ bzw. „… (14,8 Token/s)“."""
+    sek = float(e.get("sekunden") or 0)
+    text = f"Auftrag fertig nach {sek / 60:.1f} min".replace(".", ",")
+    zusatz = []
+    audio = e.get("audioSekunden")
+    if audio and sek > 0:
+        zusatz.append(f"{audio / 60:.0f} min Audio, {audio / sek:.1f}× Echtzeit".replace(".", ","))
+    if e.get("tokenS"):
+        zusatz.append(f"{e['tokenS']:.1f} Token/s".replace(".", ","))
+    return text + (f" ({'; '.join(zusatz)})" if zusatz else "")
+
+
 class Dienst:
     def __init__(self, einstellungen: Einstellungen, befehl: list[str] | None = None):
         self.e = einstellungen
@@ -363,9 +376,15 @@ class Dienst:
         elif art == "fortschritt":
             if self.zustand["art"] == "arbeitet":
                 self.zustand["p"] = e.get("p", 0)
+        elif art == "taetigkeit":  # was der Worker gerade tut – für die Statuskarte
+            if self.zustand["art"] == "arbeitet":
+                self.zustand["taetigkeit"] = e.get("text") or ""
+                if e.get("tokenS"):
+                    self.zustand["tokenS"] = e["tokenS"]
+            self.protokoll.schreiben(e.get("text") or "")
         elif art == "fertig":
             self.statistik.erledigt(e.get("sekunden") or 0, e.get("audioSekunden"), e.get("peakVramMb"))
-            self.protokoll.schreiben(f"Auftrag fertig nach {round((e.get('sekunden') or 0) / 60, 1)} min")
+            self.protokoll.schreiben(fertig_text(e))
         elif art == "fehlgeschlagen":
             self.protokoll.schreiben(f"Auftrag fehlgeschlagen: {e.get('code')} – {e.get('message')}")
             self.letzter_fehlschlag = {"code": e.get("code"), "zeit": time.time()}
