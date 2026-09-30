@@ -406,3 +406,21 @@ def test_fertig_text():
     assert fertig_text({"sekunden": 492, "audioSekunden": 2820}) == "Auftrag fertig nach 8,2 min (47 min Audio, 5,7× Echtzeit)"
     assert fertig_text({"sekunden": 300, "tokenS": 14.8}) == "Auftrag fertig nach 5,0 min (14,8 Token/s)"
     assert fertig_text({"sekunden": 60}) == "Auftrag fertig nach 1,0 min"
+
+
+def test_diagnose_nennt_home_und_python_ordner(tmp_path, monkeypatch):
+    from taleward_worker import motor, pfade
+
+    monkeypatch.setenv("TALEWARD_WORKER_HOME", str(tmp_path))
+    (tmp_path / "motor").mkdir()
+    echt = tmp_path / "python" / "cpython-3.11.16-windows-x86_64-none"
+    echt.mkdir(parents=True)
+    (tmp_path / "python" / "cpython-3.11.13-windows-x86_64-none").mkdir()
+    exe = echt / ("python.exe" if pfade.WINDOWS else "bin/python3.11")
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("")
+    (tmp_path / "motor" / "pyvenv.cfg").write_text(f"home = {tmp_path / 'python' / 'weg'}\nuv = 0.12.19\n", encoding="utf-8")
+    zeilen = motor.diagnose()
+    assert zeilen[0].endswith("weg (uv 0.12.19)") and "Ordner vorhanden: nein" in zeilen[1]
+    assert "cpython-3.11.16-windows-x86_64-none (Ordner, python)" in zeilen[2]
+    assert "cpython-3.11.13-windows-x86_64-none (Ordner)" in zeilen[2] and zeilen[3] == "python-ohne-uv\\: fehlt"

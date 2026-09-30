@@ -321,6 +321,11 @@ class Dienst:
                 self._soll_laufen = False
             elif kaputt:  # Neustarten hilft nicht – die App bietet an, das KI-Paket neu zu installieren
                 self.protokoll.schreiben("Das KI-Paket findet sein Python nicht – bitte neu installieren")
+                try:
+                    for zeile in motor.diagnose():
+                        self.protokoll.schreiben("  " + zeile)
+                except Exception as e:  # noqa: BLE001 – Diagnose darf nie selbst zum Fehler werden
+                    self.protokoll.schreiben(f"  (Diagnose nicht möglich: {type(e).__name__})")
                 self._setzen("fehler", code="motor_kaputt", text=letzter_fehler)
                 self._soll_laufen = False
             elif art == "fehler":  # Einrichtungsfehler (z. B. Modell fehlt auf dem Server): später erneut

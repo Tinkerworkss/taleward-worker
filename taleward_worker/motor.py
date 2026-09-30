@@ -423,6 +423,37 @@ def reparieren() -> bool:
     return True
 
 
+def diagnose() -> list[str]:
+    """Wenn das KI-Paket sein Python nicht findet („uv trampoline failed“): was steht in pyvenv.cfg, gibt es den
+    Ordner, welche Pythons liegen da? Nur Pfade und Ja/Nein – fürs Protokoll, damit die Ursache beim nächsten Mal
+    nicht wieder im Dunkeln bleibt."""
+    exe = "python.exe" if sys.platform == "win32" else "bin/python3.11"
+    zeilen = []
+    cfg = pfade.motor() / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(encoding="utf-8")
+        home = next((z.split("=", 1)[1].strip() for z in text.splitlines() if z.strip().lower().startswith("home")), "")
+        uv = next((z.split("=", 1)[1].strip() for z in text.splitlines() if z.strip().lower().startswith("uv")), "?")
+        zeilen.append(f"pyvenv.cfg: home = {home or '(fehlt)'} (uv {uv})")
+        if home:
+            zeilen.append(f"  Ordner vorhanden: {'ja' if Path(home).is_dir() else 'nein'}, "
+                          f"{exe}: {'ja' if (Path(home) / exe).is_file() else 'nein'}")
+    except OSError as e:
+        zeilen.append(f"pyvenv.cfg nicht lesbar: {type(e).__name__}")
+    for name in ("python", "python-ohne-uv"):
+        ordner = pfade.basis() / name
+        if not ordner.is_dir():
+            zeilen.append(f"{name}\\: fehlt")
+            continue
+        eintraege = []
+        for d in sorted(ordner.iterdir()):
+            art = "Verknüpfung" if (d.is_symlink() or _ist_umleitung(d)) else "Ordner" if d.is_dir() else "Datei"
+            hat = (d / exe).is_file() if d.is_dir() else False
+            eintraege.append(f"{d.name} ({art}{', python' if hat else ''})")
+        zeilen.append(f"{name}\\: " + (", ".join(eintraege) or "leer"))
+    return zeilen
+
+
 def python_finden(ordner: Path) -> Path | None:
     """Neueste von uv installierte Python-3.11-Fassung (nicht die Verknüpfung „cpython-3.11-…“)."""
     kandidaten = []
