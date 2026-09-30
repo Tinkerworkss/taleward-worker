@@ -304,3 +304,32 @@ def test_platzpruefung_vor_der_installation(monkeypatch):
     assert motor.platz_fehlt_gb(True, "cuda") == 0
     monkeypatch.setattr(motor.shutil, "disk_usage", lambda p: type("U", (), {"free": 40 * 1024 ** 3})())
     assert motor.platz_fehlt_gb(False, "cuda") == 0
+
+
+def test_installer_kann_die_app_hoeflich_beenden(eigener_ordner):
+    from taleward_worker import einzeln
+
+    gezeigt, beendet = [], []
+    srv = einzeln.lauschen(lambda: gezeigt.append(1), lambda: beendet.append(1))
+    try:
+        assert einzeln.andere_wecken() and gezeigt == [1]
+        assert einzeln._senden(einzeln.ABSCHIED)
+        assert _warten(lambda: beendet == [1])
+        assert einzeln.sperren()  # außerhalb von Windows immer frei
+    finally:
+        import socket
+
+        srv.shutdown(socket.SHUT_RDWR)  # weckt den wartenden accept – sonst lebt der Port im Test weiter
+        srv.close()
+    assert _warten(lambda: not einzeln.andere_wecken())
+    assert einzeln.andere_beenden(warten_s=0.5)  # nichts läuft → gilt als beendet
+
+
+def test_beenden_schalter(eigener_ordner, monkeypatch):
+    from taleward_worker import __main__ as haupt, einzeln
+
+    monkeypatch.setattr(sys, "argv", ["taleward-worker", "--beenden"])
+    monkeypatch.setattr(einzeln, "andere_beenden", lambda: True)
+    assert haupt.main() == 0
+    monkeypatch.setattr(einzeln, "andere_beenden", lambda: False)
+    assert haupt.main() == 1

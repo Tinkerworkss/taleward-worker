@@ -409,6 +409,26 @@ class WorkerApp:
             else:
                 self.fenster.minimize()
 
+    def _abmeldung_beachten(self) -> None:
+        """Windows: Beim Herunterfahren oder Abmelden nicht im Weg stehen. Das Fenster lehnt Schließen sonst ab
+        (es soll ja in den Infobereich wandern) – Windows zeigte dann „Taleward Worker verhindert das
+        Herunterfahren“. SessionEnding kommt vor der Schließanfrage; danach lässt _beim_schliessen sie durch."""
+        if sys.platform != "win32":
+            return
+        try:
+            import clr  # pythonnet, kommt mit pywebview
+
+            clr.AddReference("System")
+            from Microsoft.Win32 import SystemEvents  # type: ignore[import-not-found]
+
+            def ende(_sender, _args):
+                self._beendet.set()
+                threading.Thread(target=self.beenden, daemon=True, name="abmeldung").start()
+
+            SystemEvents.SessionEnding += ende
+        except Exception as e:  # noqa: BLE001 – dann bleibt es beim alten Verhalten
+            log.debug("SessionEnding nicht abonniert: %s", e)
+
     def beenden(self) -> None:
         self._beendet.set()
         for inst in (self.installation, self.ollama_installation):
@@ -496,9 +516,10 @@ class WorkerApp:
 
         from taleward_worker import einzeln
 
-        if einzeln.andere_wecken():
+        if einzeln.andere_wecken() or not einzeln.sperren():
             return
-        einzeln.lauschen(self.zeigen)
+        einzeln.lauschen(self.zeigen, self.beenden)
+        self._abmeldung_beachten()
         if not webview2_vorhanden():
             webview2_fehlt_melden()
             return

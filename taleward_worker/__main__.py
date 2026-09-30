@@ -17,6 +17,11 @@ def main() -> int:
         ui = pfade.ressourcen() / "ui" / "index.html"
         print("Taleward Worker ok:", ui.exists(), hardware.bericht()["system"])
         return 0 if ui.exists() else 1
+    if "--beenden" in argumente:
+        # Für den Installer: die laufende App höflich beenden (0 = keine läuft mehr)
+        from taleward_worker import einzeln
+
+        return 0 if einzeln.andere_beenden() else 1
     _fehler_sichtbar_machen()
     _systemzertifikate()
     try:
