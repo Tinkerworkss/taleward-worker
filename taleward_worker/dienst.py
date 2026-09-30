@@ -376,12 +376,11 @@ class Dienst:
         elif art == "fortschritt":
             if self.zustand["art"] == "arbeitet":
                 self.zustand["p"] = e.get("p", 0)
-        elif art == "taetigkeit":  # was der Worker gerade tut – für die Statuskarte
-            if self.zustand["art"] == "arbeitet":
+        elif art == "taetigkeit":  # was der Worker gerade tut – für die Statuskarte (ins Protokoll schreibt der
+            if self.zustand["art"] == "arbeitet":  # Worker die Zeile selbst; hier sonst doppelt)
                 self.zustand["taetigkeit"] = e.get("text") or ""
                 if e.get("tokenS"):
                     self.zustand["tokenS"] = e["tokenS"]
-            self.protokoll.schreiben(e.get("text") or "")
         elif art == "fertig":
             self.statistik.erledigt(e.get("sekunden") or 0, e.get("audioSekunden"), e.get("peakVramMb"))
             self.protokoll.schreiben(fertig_text(e))

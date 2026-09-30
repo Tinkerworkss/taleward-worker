@@ -125,7 +125,7 @@ def test_dienst_verarbeitet_ereignisse(tmp_path):
     assert _warten(lambda: d.statistik.fuer_oberflaeche()["heute"] == 1 and d.zustand["art"] == "warte")
     assert d.info["gpu"] == "Test-GPU"
     assert any("Auftrag fertig nach 1,5 min (47 min Audio, 31,3× Echtzeit)" in z for z in d.protokoll.zeilen)
-    assert any("Transkription läuft (47 min Audio)" in z for z in d.protokoll.zeilen)
+    assert not any("Transkription läuft (47 min Audio)" in z for z in d.protokoll.zeilen)  # schreibt der Worker selbst
     assert any(z.endswith("Worker bereit") and "12:00:00" not in z for z in d.protokoll.zeilen)
     d.pausieren(True)
     assert _warten(lambda: d.zustand["art"] == "pausiert")
