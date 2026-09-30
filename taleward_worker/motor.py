@@ -168,10 +168,7 @@ class Installation:
             if self._abbrechen.is_set():
                 raise MotorFehler("abgebrochen")
             letzte = "\n".join(self.zeilen[-12:])
-            code = "kein_platz" if "No space left" in letzte or "Speicherplatz" in letzte else "installation"
-            code = "netz" if code == "installation" and ("dns error" in letzte or "timed out" in letzte
-                                                        or "Failed to fetch" in letzte) else code
-            raise MotorFehler(code, letzte)
+            raise MotorFehler(fehlercode(letzte), letzte)
         self.anteil = anteil_bis
 
     def _mitlesen(self, p: subprocess.Popen) -> None:
@@ -228,26 +225,32 @@ class Installation:
         if cuda and ist.get("cuda") is None:  # keine CUDA-Fassung gelandet – nicht als Grafikkarten-Motor eintragen
             raise MotorFehler("installation", ist.get("fehler") or "PyTorch wurde ohne CUDA installiert.")
 
+        # ffmpeg noch aus dem neuen Ordner heraus einrichten – scheitert das, ist der alte Motor unberührt
+        ffmpeg_einrichten(Path(py))
+        kennzeichnung = {"fassung": self.fassung, "ref": q["ref"], "testmodus": self.testmodus,
+                         "backend": self.backend, "torch": ist, "installiert": time.strftime("%Y-%m-%d %H:%M")}
+        (neu / "taleward-motor.json").write_text(json.dumps(kennzeichnung), encoding="utf-8")
+
         # Erst jetzt den alten Motor ersetzen – bei einem Fehler bleibt der bisherige nutzbar
         alt = pfade.motor()
         weg = pfade.basis() / "motor-alt"
-        shutil.rmtree(weg, ignore_errors=True)
+        ordner_entfernen(weg)
         if callable(self.vor_tausch):
             self.vor_tausch()
+        self.phase = "tauschen"
         try:
             if alt.exists():
-                alt.rename(weg)
-            neu.rename(alt)
-            ffmpeg_einrichten(pfade.motor_python())
+                umbenennen(alt, weg)
+            umbenennen(neu, alt)
+        except BaseException:
+            self.phase = "fehler"  # damit nach_tausch die alte Fassung stehen lässt
+            raise
         finally:
             if callable(self.nach_tausch):
                 self.nach_tausch()
-        shutil.rmtree(weg, ignore_errors=True)
+        ordner_entfernen(weg)
         # Hinweis: Skripte im Motor (chronik.exe) kennen noch den alten Ordnernamen – gestartet wird daher immer
         # mit „python -m app.cli“, das funktioniert nach dem Umbenennen weiter.
-        (alt / "taleward-motor.json").write_text(json.dumps(
-            {"fassung": self.fassung, "ref": q["ref"], "testmodus": self.testmodus, "backend": self.backend,
-             "torch": ist, "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
 
 
     # ------------------------------------------------------------------ Schneller Weg bei neuer Serverfassung
@@ -429,9 +432,8 @@ def anforderungen_aufteilen(text: str) -> tuple[str, str]:
 
 def ffmpeg_einrichten(python: Path) -> Path:
     """ffmpeg aus imageio-ffmpeg als „ffmpeg(.exe)“ in den Werkzeug-Ordner legen (WhisperX ruft „ffmpeg“ auf)."""
-    aus = subprocess.run([str(python), "-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"],
-                         capture_output=True, text=True, timeout=60, **_ohne_fenster())
-    quelle_pfad = Path(aus.stdout.strip())
+    aus = _python_pruefen(str(python), "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())", timeout=60)
+    quelle_pfad = Path(aus.stdout.strip().splitlines()[-1]) if aus.stdout.strip() else Path("fehlt")
     if aus.returncode != 0 or not quelle_pfad.exists():
         raise MotorFehler("ffmpeg", aus.stderr[-1000:])
     ziel = pfade.werkzeuge() / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
@@ -479,6 +481,63 @@ def torch_pruefen(py: str) -> dict:
         return {"fehler": (r.stderr or r.stdout)[-1000:].strip() or "PyTorch antwortet nicht."}
 
 
+def fehlercode(ausgabe: str) -> str:
+    """Aus der letzten uv-Ausgabe einen Fehlercode für die Oberfläche machen (Texte in ui/texte.js, f_…)."""
+    klein = ausgabe.lower()
+    if any(s in klein for s in ("no space left", "speicherplatz", "not enough space", "os error 112")):
+        return "kein_platz"
+    if "os error 206" in klein or "filename or extension is too long" in klein or "zu lang" in klein:
+        return "pfad_zu_lang"
+    if any(s in klein for s in ("os error 5", "os error 32", "access is denied", "zugriff verweigert",
+                                "being used by another process")):
+        return "dateien_in_benutzung"
+    if any(s in klein for s in ("dns error", "timed out", "failed to fetch", "connection reset",
+                                "certificate", "tls handshake")):
+        return "netz"
+    return "installation"
+
+
+def umbenennen(von: Path, nach: Path, versuche: int = 20, pause: float = 0.5) -> None:
+    """Ordner umbenennen, unter Windows mit Geduld: direkt nach dem Beenden des Motors hält Windows Handles noch
+    kurz offen, und der Virenscanner liest gerade die frisch geschriebenen Dateien – jede offene Datei lässt die
+    Umbenennung mit „Zugriff verweigert“ scheitern. Nach den Versuchen ein sprechender Fehler statt „unerwartet“."""
+    letzter: OSError | None = None
+    for _ in range(max(1, versuche)):
+        try:
+            von.rename(nach)
+            return
+        except FileExistsError:
+            ordner_entfernen(nach)
+            letzter = FileExistsError(str(nach))
+        except PermissionError as e:
+            letzter = e
+        except OSError as e:
+            if getattr(e, "winerror", None) not in (5, 32, 145):  # Zugriff verweigert, in Benutzung, nicht leer
+                raise
+            letzter = e
+        time.sleep(pause)
+    raise MotorFehler("dateien_in_benutzung", f"{von.name} → {nach.name}: {letzter}")
+
+
+def ordner_entfernen(p: Path) -> None:
+    """rmtree, das auch schreibgeschützte Dateien (Windows) wegräumt und bei gesperrten nicht aufgibt."""
+    if not p.exists():
+        return
+
+    def nachhelfen(funktion, pfad, _info):
+        try:
+            os.chmod(pfad, 0o700)
+            funktion(pfad)
+        except OSError:
+            pass
+
+    for _ in range(3):
+        shutil.rmtree(p, onerror=nachhelfen)
+        if not p.exists():
+            return
+        time.sleep(0.5)
+
+
 def installiert() -> dict | None:
     try:
         d = json.loads((pfade.motor() / "taleward-motor.json").read_text(encoding="utf-8"))
@@ -488,8 +547,8 @@ def installiert() -> dict | None:
 
 
 def entfernen(modelle_auch: bool = False) -> None:
-    for p in [pfade.motor(), pfade.basis() / "motor-neu", pfade.basis() / "python", pfade.basis() / "cache",
-              pfade.werkzeuge()]:
-        shutil.rmtree(p, ignore_errors=True)
+    for p in [pfade.motor(), pfade.basis() / "motor-neu", pfade.basis() / "motor-alt", pfade.basis() / "python",
+              pfade.basis() / "python-ohne-uv", pfade.basis() / "cache", pfade.werkzeuge()]:
+        ordner_entfernen(p)
     if modelle_auch:
         shutil.rmtree(pfade.modelle(), ignore_errors=True)

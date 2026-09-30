@@ -103,3 +103,99 @@ def test_absturz_wird_protokolliert(eigener_ordner, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     haupt.absturz_melden("Traceback …\nRuntimeError: peng")
     assert "peng" in (pfade.protokolle() / "absturz.log").read_text(encoding="utf-8")
+
+
+def test_einstellungen_ueberleben_kaputte_datei(eigener_ordner):
+    from taleward_worker import pfade
+
+    e = Einstellungen(server="https://x", token="geheim")
+    e.speichern()
+    e.name = "zweiter"
+    e.speichern()
+    assert pfade.einstellungen().with_suffix(".bak").exists()
+    pfade.einstellungen().write_text("")  # Stromausfall: leere Datei
+    geladen = Einstellungen.laden()
+    assert geladen.token == "geheim" and geladen.server == "https://x"
+    assert not pfade.einstellungen().with_suffix(".tmp").exists()
+
+
+def test_einstellungen_speichern_mit_geduld(eigener_ordner, monkeypatch):
+    from taleward_worker import einstellungen as modul
+
+    versuche = {"n": 0}
+    echt = os.replace
+
+    def zickig(a, b):
+        versuche["n"] += 1
+        if versuche["n"] < 3:
+            raise PermissionError("[WinError 32] in Benutzung")
+        echt(a, b)
+
+    monkeypatch.setattr(modul.os, "replace", zickig)
+    monkeypatch.setattr(modul.time, "sleep", lambda s: None)
+    Einstellungen(server="https://x", token="t").speichern()
+    assert versuche["n"] == 3 and Einstellungen.laden().token == "t"
+
+
+def test_fehlercodes_aus_uv_ausgabe():
+    from taleward_worker.motor import fehlercode
+
+    assert fehlercode("There is not enough space on the disk. (os error 112)") == "kein_platz"
+    assert fehlercode("No space left on device") == "kein_platz"
+    assert fehlercode("The filename or extension is too long. (os error 206)") == "pfad_zu_lang"
+    assert fehlercode("Access is denied. (os error 5)") == "dateien_in_benutzung"
+    assert fehlercode("error sending request: dns error") == "netz"
+    assert fehlercode("invalid peer certificate: UnknownIssuer") == "netz"
+    assert fehlercode("irgendwas") == "installation"
+
+
+def test_umbenennen_mit_geduld(tmp_path, monkeypatch):
+    from taleward_worker import motor
+
+    monkeypatch.setattr(motor.time, "sleep", lambda s: None)
+    von, nach = tmp_path / "neu", tmp_path / "alt"
+    von.mkdir()
+    echt = motor.Path.rename
+    versuche = {"n": 0}
+
+    def zickig(self, ziel):
+        versuche["n"] += 1
+        if versuche["n"] < 4:
+            raise PermissionError("[WinError 5] Zugriff verweigert")
+        return echt(self, ziel)
+
+    monkeypatch.setattr(motor.Path, "rename", zickig)
+    motor.umbenennen(von, nach)
+    assert nach.exists() and not von.exists() and versuche["n"] == 4
+
+    monkeypatch.setattr(motor.Path, "rename", lambda self, ziel: (_ for _ in ()).throw(PermissionError("x")))
+    with pytest.raises(motor.MotorFehler) as e:
+        motor.umbenennen(nach, von, versuche=2)
+    assert e.value.code == "dateien_in_benutzung"
+
+
+def test_gescheiterter_tausch_wird_nicht_als_neue_fassung_gezaehlt(eigener_ordner, monkeypatch):
+    """Scheitert der Tausch, bleibt der alte Motor und die App merkt sich NICHT die neue Fassung."""
+    import json
+    from pathlib import Path
+
+    from taleward_worker import motor, pfade
+
+    monkeypatch.setattr(motor, "quelle", lambda f: {"ref": f"v{f}", "genau": True, "paket": "p.zip",
+                                                    "anforderungen": "egal"})
+    monkeypatch.setattr(motor, "anforderungen_lesen", lambda q: "torch==2.8.0\n")
+    monkeypatch.setattr(motor, "installiert", lambda: None)
+    monkeypatch.setattr(motor, "ffmpeg_einrichten", lambda py: None)
+    monkeypatch.setattr(motor, "home_festlegen", lambda venv, py: None)
+    monkeypatch.setattr(motor, "torch_pruefen", lambda py: {"cuda": "12.8"})
+    monkeypatch.setattr(motor.Installation, "_python_einrichten", lambda self: Path("python"))
+    monkeypatch.setattr(motor.Installation, "_uv", lambda self, *a, **k: Path(a[1]).mkdir(parents=True, exist_ok=True) if a[0] == "venv" else None)
+    monkeypatch.setattr(motor, "_python_pruefen", lambda *a, **k: subprocess.CompletedProcess(a, 0, "ok\n", ""))
+    monkeypatch.setattr(motor, "umbenennen", lambda v, n, **k: (_ for _ in ()).throw(motor.MotorFehler("dateien_in_benutzung", "x")))
+    pfade.motor().mkdir(parents=True)
+    (pfade.motor() / "taleward-motor.json").write_text(json.dumps({"fassung": "alt"}))
+    phasen = []
+    inst = motor.Installation("0.4.19", nach_tausch=lambda: phasen.append(inst.phase))
+    inst._lauf()
+    assert phasen == ["fehler"] and inst.fehler == "dateien_in_benutzung"
+    assert json.loads((pfade.motor() / "taleward-motor.json").read_text())["fassung"] == "alt"

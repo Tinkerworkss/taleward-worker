@@ -59,7 +59,9 @@ Name: "{userdesktop}\Taleward Worker"; Filename: "{app}\TalewardWorker.exe"; Tas
 [Registry]
 ; Gleicher Eintrag, den die App unter Einstellungen → „Mit dem Computer starten“ setzt oder entfernt
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Taleward Worker"; \
-  ValueData: """{app}\TalewardWorker.exe"" --hintergrund"; Tasks: autostart; Flags: uninsdeletevalue
+  ValueData: """{app}\TalewardWorker.exe"" --hintergrund"; Tasks: autostart; Flags: uninsdeletevalue; Check: not WizardSilent
+; (nicht bei stillen Updates: Inno würde sonst den beim ersten Mal gewählten Autostart wieder einschalten,
+;  auch wenn er in der App inzwischen abgeschaltet wurde)
 
 [Run]
 Filename: "{app}\TalewardWorker.exe"; Description: "{cm:Starten}"; Flags: nowait postinstall skipifsilent
