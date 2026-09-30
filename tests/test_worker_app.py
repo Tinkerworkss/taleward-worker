@@ -326,3 +326,73 @@ def test_kaputtes_ki_paket_startet_nicht_im_kreis(tmp_path):
     time.sleep(1.5)
     assert not d.laeuft() and d.zustand["art"] == "fehler"
     assert any("neu installieren" in z for z in d.protokoll.zeilen)
+
+
+def test_feste_cuda_fassung_und_ist_pruefung(eigener_ordner, monkeypatch):
+    """Nicht „auto“: uv würde bei älteren Treibern einen Index ohne die festgeschriebene torch-Fassung wählen.
+    Nach der Installation wird geprüft, was wirklich drin ist, und in taleward-motor.json vermerkt."""
+    import subprocess as sp
+
+    monkeypatch.setattr(motor, "quelle", lambda f: {"ref": f"v{f}", "genau": True, "paket": "paket.zip",
+                                                    "anforderungen": "egal"})
+    monkeypatch.setattr(motor, "anforderungen_lesen", lambda q: "torch==2.8.0\n")
+    monkeypatch.setattr(motor, "installiert", lambda: None)
+    monkeypatch.setattr(motor, "ffmpeg_einrichten", lambda py: None)
+    monkeypatch.setattr(motor, "home_festlegen", lambda venv, py: None)
+    monkeypatch.setattr(motor.Installation, "_python_einrichten", lambda self: Path("python"))
+    uv = []
+
+    def _uv(self, *a, **k):
+        uv.append(a)
+        if a[0] == "venv":
+            Path(a[1]).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(motor.Installation, "_uv", _uv)
+    antworten = {"cuda": '{"cuda": "12.8", "sichtbar": true, "karte": "RTX"}'}
+
+    def run(befehl, **kw):
+        assert kw.get("encoding") == "utf-8" and "PYTHONHOME" not in kw["env"] and kw["env"]["PYTHONUTF8"] == "1"
+        return sp.CompletedProcess(befehl, 0, antworten["cuda"] if "torch" in befehl[-1] else "ok\n", "")
+    monkeypatch.setenv("PYTHONHOME", "C:\\Anaconda")
+    monkeypatch.setattr(motor.subprocess, "run", run)
+    inst = motor.Installation("0.4.19")
+    inst._lauf()
+    assert inst.phase == "fertig"
+    install = next(a for a in uv if a[0] == "pip" and "--torch-backend" in a)
+    assert install[install.index("--torch-backend") + 1] == "cu128"
+    daten = json.loads((pfade.motor() / "taleward-motor.json").read_text())
+    assert daten["torch"] == {"cuda": "12.8", "sichtbar": True, "karte": "RTX"}
+
+    # PyTorch kam ohne CUDA an → die Installation gilt als gescheitert, der alte Motor bleibt
+    antworten["cuda"] = '{"cuda": null, "sichtbar": false, "karte": null}'
+    inst = motor.Installation("0.4.19")
+    inst._lauf()
+    assert inst.phase == "fehler" and inst.fehler == "installation"
+
+
+def test_saubere_umgebung(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "x")
+    monkeypatch.setenv("UV_INDEX_URL", "x")
+    monkeypatch.setenv("PIP_INDEX_URL", "x")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+    env = motor.saubere_umgebung()
+    assert "PYTHONPATH" not in env and "UV_INDEX_URL" not in env and "PIP_INDEX_URL" not in env
+    assert env["HTTPS_PROXY"] == "http://proxy:3128"
+
+
+def test_groesste_karte_und_alter_treiber(monkeypatch):
+    from taleward_worker import dienst as modul
+
+    karten = [hardware.Grafikkarte("GTX 1650", 4096, "576.1", 0), hardware.Grafikkarte("RTX 3080", 10240, "576.1", 1)]
+    monkeypatch.setattr(hardware, "grafikkarten", lambda frisch=False: karten)
+    d = modul.Dienst(Einstellungen(server="https://x", token="t"))
+    env = d._motor_umgebung()
+    assert env["WHISPER_BATCH"] == "16" and env["CUDA_VISIBLE_DEVICES"] == "1" and env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert hardware.bericht()["grafikkarte"]["name"] == "RTX 3080"
+    # Treiber zu alt: lieber Prozessor als Fehlerschleife „PyTorch sieht keine Grafikkarte“
+    karten[:] = [hardware.Grafikkarte("RTX 3060", 12288, "512.15", 0)]
+    env = d._motor_umgebung()
+    assert env["WHISPER_DEVICE"] == "cpu" and "CUDA_VISIBLE_DEVICES" not in env
+
+
+def test_sechs_gb_karte_kleinerer_stapel():
+    assert hardware.modell_fuer(6144) == {"modell": "large-v3", "batch": 4}

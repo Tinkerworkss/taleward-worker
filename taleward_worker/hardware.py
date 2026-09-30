@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 
 from taleward_worker import pfade
 
-MIN_TREIBER = 525      # CUDA 12 (ältere Treiber: PyTorch sieht die Karte nicht)
+MIN_TREIBER = 528      # PyTorch mit CUDA 12.8 (Minor-Kompatibilität) – ältere Treiber sehen die Karte nicht
 PLATZ_KI_GB = 16       # KI-Paket (~8 GB) + Modelle (~5 GB) + Luft für Aufnahmen
 
 
@@ -18,6 +18,7 @@ class Grafikkarte:
     name: str
     vram_mb: int
     treiber: str
+    index: int = 0  # Reihenfolge von nvidia-smi (PCI-Bus)
 
     @property
     def treiber_ok(self) -> bool:
@@ -49,7 +50,7 @@ def grafikkarten(frisch: bool = False) -> list[Grafikkarte]:
 def _grafikkarten_lesen() -> list[Grafikkarte]:
     programm = shutil.which("nvidia-smi")
     if programm is None and sys.platform == "win32":
-        kandidat = r"C:\Windows\System32\nvidia-smi.exe"
+        kandidat = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvidia-smi.exe")
         programm = kandidat if os.path.exists(kandidat) else None
     if programm is None:
         return []
@@ -59,23 +60,24 @@ def _grafikkarten_lesen() -> list[Grafikkarte]:
     except (OSError, subprocess.SubprocessError):
         return []
     karten = []
-    for zeile in aus.strip().splitlines():
+    for nummer, zeile in enumerate(aus.strip().splitlines()):
         teile = [t.strip() for t in zeile.split(",")]
         if len(teile) >= 3:
             try:
-                karten.append(Grafikkarte(teile[0], int(float(teile[1])), teile[2]))
+                karten.append(Grafikkarte(teile[0], int(float(teile[1])), teile[2], nummer))
             except ValueError:
                 continue
     return karten
 
 
 # Stufen nach verfügbarem Grafikspeicher (MB, für Taleward insgesamt). Gemessen: large-v3 mit Stapel 8 braucht auf
-# einer 8-GB-Karte höchstens ~5,5 GB (plus Windows). Die übrigen Werte sind vorsichtige Schätzungen; die App zeigt
-# nach dem ersten Auftrag den gemessenen Höchstwert an. Dauer = grobe Schätzung für 4 Stunden Aufnahme.
+# einer 8-GB-Karte höchstens ~5,5 GB – plus Windows-Oberfläche und Browser (0,5–1,5 GB), darum bekommt eine 6-GB-Karte
+# Stapel 4. Die übrigen Werte sind vorsichtige Schätzungen; die App zeigt nach dem ersten Auftrag den gemessenen
+# Höchstwert an. Dauer = grobe Schätzung für 4 Stunden Aufnahme.
 STUFEN = [
     # ab MB, Modell,           Stapel, Ausrichtung, Sprecher, Dauer für 4 h (min)
     (10000, "large-v3",        16,     "cuda",      "cuda",   (15, 30)),
-    (6000,  "large-v3",        8,      "cuda",      "cuda",   (20, 40)),
+    (7000,  "large-v3",        8,      "cuda",      "cuda",   (20, 40)),
     (4500,  "large-v3",        4,      "cuda",      "cuda",   (30, 55)),
     (3500,  "large-v3-turbo",  4,      "cuda",      "cuda",   (20, 40)),
     (2000,  "large-v3-turbo",  2,      "cpu",       "cpu",    (60, 120)),
@@ -143,7 +145,7 @@ def freier_platz_gb() -> float:
 
 def bericht() -> dict:
     karten = grafikkarten(frisch=True)
-    k = karten[0] if karten else None
+    k = max(karten, key=lambda g: g.vram_mb) if karten else None
     platz = freier_platz_gb()
     ram = arbeitsspeicher_gb()
     return {

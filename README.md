@@ -17,7 +17,7 @@ Der Server liegt unter [taleward-server](https://github.com/Tinkerworkss/talewar
 herunterladen und starten. Administratorrechte sind nicht nötig.
 
 - Windows 10 (ab 1809) oder 11
-- am besten eine NVIDIA-Grafikkarte (ab 2 GB, gut ab 6 GB) mit aktuellem Treiber (ab 525); sonst arbeitet der Prozessor
+- am besten eine NVIDIA-Grafikkarte (ab 2 GB, gut ab 6 GB) mit aktuellem Treiber (ab 528); sonst arbeitet der Prozessor
 - mindestens 8 GB Arbeitsspeicher
 - etwa 16 GB freier Speicher (KI-Paket etwa 8 GB, Sprachmodelle etwa 5 GB)
 

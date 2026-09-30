@@ -29,6 +29,12 @@ from taleward_worker import REPO, VERSION, pfade
 # Ungefähre Downloadgröße (für die Fortschrittsanzeige; gemessen an der Größe des Zwischenspeichers)
 # Größe des installierten KI-Pakets in MB (gemessen: Windows mit CUDA 7,7 GB, Stand 0.4.4). Der Fortschritt zählt,
 # wie weit der Zwischenspeicher von uv gewachsen ist – dort liegen die Pakete entpackt, also in dieser Größe.
+# CUDA-Fassung von PyTorch. Fest statt „auto“: uv würde nach der Treiber-Fassung wählen und bei Treibern vor 560 auf
+# einem Index landen, auf dem die festgeschriebene torch-Fassung gar nicht liegt (Installation scheitert oder wird
+# stillschweigend Prozessor). cu128 läuft dank CUDA-Minor-Kompatibilität mit jedem Treiber ab 528; genau diese
+# Fassung prüft auch der Bau (packaging/pruefe-ki-paket.sh).
+TORCH_BACKEND = "cu128"
+
 ERWARTET_MB = {"windows": 7900, "linux": 8500, "cpu": 1800, "test": 60}
 
 
@@ -127,8 +133,8 @@ class Installation:
             shutil.rmtree(pfade.basis() / "cache", ignore_errors=True)  # spart einige GB
 
     def _umgebung(self) -> dict:
-        env = dict(os.environ)
-        env.update({"UV_CACHE_DIR": str(pfade.basis() / "cache"),
+        env = saubere_umgebung()
+        env.update({"UV_NO_CONFIG": "1", "UV_CACHE_DIR": str(pfade.basis() / "cache"),
                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
                     "UV_PYTHON_PREFERENCE": "only-managed",
                     "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "hardlink"})  # kein zweites Exemplar: spart während der Installation ~8 GB
@@ -137,7 +143,6 @@ class Installation:
             # nicht mehr ansehen (sonst os error 448 bei jeder Abfrage des Interpreters)
             env["UV_PYTHON_INSTALL_DIR"] = str(pfade.basis() / "python-ohne-uv")
             env["UV_PYTHON_PREFERENCE"] = "managed"
-        env.pop("VIRTUAL_ENV", None)
         return env
 
     def _uv(self, *argumente: str, anteil_von: float, anteil_bis: float, erwartet_mb: int = 0,
@@ -198,7 +203,7 @@ class Installation:
             self._uv("pip", "install", "--python", py, q["paket"], "imageio-ffmpeg",
                      anteil_von=0.06, anteil_bis=0.95, erwartet_mb=self.erwartet_mb)
         else:
-            torch = "cpu" if self.backend == "cpu" else "auto"  # auto: CUDA-Fassung passend zum Treiber
+            torch = "cpu" if self.backend == "cpu" else TORCH_BACKEND
             basis, extra = anforderungen_aufteilen(anforderungen_lesen(q["anforderungen"]))
             ordner = pfade.basis() / "cache"
             ordner.mkdir(parents=True, exist_ok=True)
@@ -215,10 +220,13 @@ class Installation:
             self._uv("pip", "install", "--python", py, "--no-deps", q["paket"], anteil_von=0.9, anteil_bis=0.95)
 
         self.phase = "ffmpeg"
-        pruefung = subprocess.run([py, "-c", "import app, sys; print('ok')"], capture_output=True, text=True,
-                                  timeout=120, **_ohne_fenster())
+        pruefung = _python_pruefen(py, "import app, sys; print('ok')")
         if "ok" not in pruefung.stdout:
             raise MotorFehler("installation", pruefung.stderr[-2000:])
+        cuda = self.backend != "cpu" and not self.testmodus
+        ist = torch_pruefen(py) if cuda else {}
+        if cuda and ist.get("cuda") is None:  # keine CUDA-Fassung gelandet – nicht als Grafikkarten-Motor eintragen
+            raise MotorFehler("installation", ist.get("fehler") or "PyTorch wurde ohne CUDA installiert.")
 
         # Erst jetzt den alten Motor ersetzen – bei einem Fehler bleibt der bisherige nutzbar
         alt = pfade.motor()
@@ -239,7 +247,7 @@ class Installation:
         # mit „python -m app.cli“, das funktioniert nach dem Umbenennen weiter.
         (alt / "taleward-motor.json").write_text(json.dumps(
             {"fassung": self.fassung, "ref": q["ref"], "testmodus": self.testmodus, "backend": self.backend,
-             "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
+             "torch": ist, "installiert": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
 
 
     # ------------------------------------------------------------------ Schneller Weg bei neuer Serverfassung
@@ -254,7 +262,7 @@ class Installation:
             ordner = pfade.basis() / "cache"
             ordner.mkdir(parents=True, exist_ok=True)
             (ordner / "pruefen.txt").write_text(basis + "\n" + extra, encoding="utf-8")
-            torch = "cpu" if self.backend == "cpu" else "auto"
+            torch = "cpu" if self.backend == "cpu" else TORCH_BACKEND
             res = subprocess.run([uv_programm(), "pip", "install", "--dry-run", "--python", str(pfade.motor_python()),
                                   "--no-deps", "--torch-backend", torch, "-r", str(ordner / "pruefen.txt")],
                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
@@ -275,8 +283,7 @@ class Installation:
         try:
             self._uv("pip", "install", "--python", py, "--no-deps", "--reinstall", q["paket"],
                      anteil_von=0.1, anteil_bis=0.9)
-            pruefung = subprocess.run([py, "-c", "import app, sys; print('ok')"], capture_output=True, text=True,
-                                      timeout=120, **_ohne_fenster())
+            pruefung = _python_pruefen(py, "import app, sys; print('ok')")
             if "ok" not in pruefung.stdout:
                 raise MotorFehler("installation", pruefung.stderr[-2000:])
             daten = installiert() or {}
@@ -433,6 +440,43 @@ def ffmpeg_einrichten(python: Path) -> Path:
     if sys.platform != "win32":
         ziel.chmod(0o755)
     return ziel
+
+
+# Umgebungsvariablen, die fremde Python- oder uv-Installationen hinterlassen und den Motor verbiegen würden:
+# PYTHONHOME (Anaconda-Altlast → „Fatal Python error: init_fs_encoding“), PYTHONPATH (fremdes numpy/torch),
+# UV_*/PIP_* (andere Indexe, Konfigurationsdateien, Offline-Modus).
+_FREMDE_VARIABLEN = ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONSAFEPATH",
+                     "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PIP_REQUIRE_VIRTUALENV")
+
+
+def saubere_umgebung() -> dict:
+    """Kopie der Umgebung ohne alles, was Python oder uv von außen umstellt."""
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() not in _FREMDE_VARIABLEN and not k.upper().startswith(("UV_", "PIP_"))}
+    return env
+
+
+def _python_pruefen(py: str, code: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Kurzer Probelauf im Motor – immer UTF-8, unabhängig von der Windows-Codepage und von Umgebungsvariablen des
+    Benutzers (PYTHONHOME, PYTHONPATH …), die den Motor sonst aus dem Tritt bringen."""
+    env = saubere_umgebung()
+    env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+    return subprocess.run([py, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout, env=env, **_ohne_fenster())
+
+
+def torch_pruefen(py: str) -> dict:
+    """Was ist wirklich drin? {"cuda": "12.8" | None, "sichtbar": bool, "karte": str | None} – oder {"fehler": …}."""
+    code = ("import json, torch; v = torch.version.cuda; s = bool(v) and torch.cuda.is_available(); "
+            "print(json.dumps({'cuda': v, 'sichtbar': s, 'karte': torch.cuda.get_device_name(0) if s else None}))")
+    try:
+        r = _python_pruefen(py, code, timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"fehler": f"{type(e).__name__}: {e}"}
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"fehler": (r.stderr or r.stdout)[-1000:].strip() or "PyTorch antwortet nicht."}
 
 
 def installiert() -> dict | None:

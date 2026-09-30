@@ -243,6 +243,8 @@ class WorkerApp:
             return False
         if not self.e.testmodus and self.e.geraet != "cpu" and inst.get("backend") == "cpu":
             return False  # Grafikkarte gewünscht, installiert ist nur die Prozessor-Fassung
+        if not self.e.testmodus and self.e.geraet != "cpu" and inst.get("torch", {}).get("cuda", "?") is None:
+            return False  # als Grafikkarten-Fassung eingetragen, aber PyTorch kam ohne CUDA an → neu installieren
         return not self.server_version or inst.get("fassung") == self.server_version
 
     # -- Ollama (lokale Recaps)

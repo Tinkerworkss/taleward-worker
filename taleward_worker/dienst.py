@@ -168,10 +168,18 @@ class Dienst:
         else:
             threading.Thread(target=self.neu_starten, daemon=True).start()
 
-    def profil(self) -> dict:
+    def karte(self):
+        """Die Grafikkarte, mit der gearbeitet wird: die mit dem meisten Speicher (None = keine)."""
         karten = hardware.grafikkarten()
-        return hardware.profil(karten[0].vram_mb if karten else None, self.e.vram_grenze_mb, self.e.modell,
-                               prozessor=self.e.geraet == "cpu")
+        return max(karten, key=lambda k: k.vram_mb) if karten else None
+
+    def profil(self) -> dict:
+        karte = self.karte()
+        # Zu alter Treiber: PyTorch sähe die Karte nicht und der Motor bliebe in einer Fehlerschleife – lieber
+        # Prozessor, die Oberfläche zeigt den Treiberhinweis
+        prozessor = self.e.geraet == "cpu" or (karte is not None and not karte.treiber_ok)
+        return hardware.profil(karte.vram_mb if karte else None, self.e.vram_grenze_mb, self.e.modell,
+                               prozessor=prozessor)
 
     def pausieren(self, an: bool) -> None:
         self.e.pausiert = an
@@ -197,7 +205,7 @@ class Dienst:
         return befehl
 
     def _motor_umgebung(self) -> dict:
-        env = dict(os.environ)
+        env = motor.saubere_umgebung()
         wahl = self.profil()
         env.update({
             "WHISPER_DEVICE": wahl["geraet"], "ALIGN_DEVICE": wahl["ausrichten"], "DIARIZE_DEVICE": wahl["sprecher"],
@@ -214,8 +222,13 @@ class Dienst:
             # Recaps mit Ollama: eigenes/vorhandenes Ollama oder bewusst keins (sonst fände der Worker ein fremdes)
             "WORKER_LLM_URL": self._ollama_adresse(),
         })
-        for schluessel in ("VIRTUAL_ENV", "HF_TOKEN", "DATABASE_URL"):
+        for schluessel in ("HF_TOKEN", "DATABASE_URL"):
             env.pop(schluessel, None)
+        karte = self.karte()
+        if karte is not None and wahl["geraet"] == "cuda":
+            # nvidia-smi zählt in PCI-Reihenfolge, CUDA sonst „schnellste zuerst“ – bei zwei Karten sollen beide
+            # dieselbe meinen (die mit dem meisten Speicher)
+            env.update({"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": str(karte.index)})
         return env
 
     def _ollama_adresse(self) -> str:
