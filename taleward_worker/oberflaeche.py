@@ -267,7 +267,8 @@ class WorkerApp:
                                     if not self.dienst.ollama.laeuft() else False)
         inst = self.ollama_installation
         return {"an": self.e.recaps_lokal, "installiert": ollama.installiert(), "laeuft": self.dienst.ollama.laeuft(),
-                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG,
+                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG, "fehler": self.dienst.ollama.fehler,
+                "moeglich": bool((self.hardware or {}).get("recapsMoeglich", True)),
                 "installation": inst.stand() if inst and inst.phase != "fertig" else None,
                 "sprachmodell": self.dienst.info.get("llm")}
 
@@ -276,6 +277,14 @@ class WorkerApp:
             return
         self.e.testmodus = testmodus
         self.e.speichern()
+        fehlt_gb = motor.platz_fehlt_gb(testmodus, "cpu" if self.e.geraet == "cpu" else "cuda")
+        if fehlt_gb:
+            # Gar nicht erst anfangen: ein voller Datenträger bricht mittendrin ab, und Windows selbst leidet
+            self.installation = motor.Installation(self.server_version or "", testmodus=testmodus)
+            self.installation.phase, self.installation.fehler = "fehler", "kein_platz"
+            self.installation.fehlertext = f"Es fehlen etwa {fehlt_gb:.0f} GB freier Speicherplatz."
+            self.dienst.protokoll.schreiben(f"Installation nicht gestartet: {self.installation.fehlertext}")
+            return
         war_aktiv = {"an": False}
 
         def vor():
@@ -312,6 +321,20 @@ class WorkerApp:
             if self.dienst.zustand.get("art") != "arbeitet" and not laeuft_installation:
                 self.installieren(self.e.testmodus)
 
+    def _ollama_pruefen(self) -> None:
+        """Lokale Recaps gewünscht, aber Ollama fehlt oder hat eine alte Fassung (nach einem App-Update)? Dann
+        nachladen – sonst wanderten die Recaps still auf den Server, und die Oberfläche zeigte nichts."""
+        if not self.e.recaps_lokal or not self.e.gekoppelt or self.e.testmodus:
+            return
+        if ollama.installiert() or ollama.antwortet(ollama.FREMDE_ADRESSE):
+            return
+        if self.ollama_installation and self.ollama_installation.phase not in ("fertig", "fehler"):
+            return
+        if self.ollama_installation and self.ollama_installation.phase == "fehler":
+            return  # nicht im Kreis laden – der Nutzer sieht den Fehler und kann neu anstoßen
+        self.dienst.protokoll.schreiben("Ollama fehlt oder ist veraltet – wird geladen")
+        self.ollama_installieren()
+
     def _hintergrund_pflege(self) -> None:
         """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 5 Minuten die
         Serverfassung (ein kleiner Abruf – so zieht das KI-Paket kurz nach einem Server-Update nach) und alle
@@ -321,6 +344,7 @@ class WorkerApp:
         while not self._beendet.is_set():
             try:
                 self._motor_pruefen(erster)
+                self._ollama_pruefen()
                 if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
                     self.app_update_pruefen()
                     naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE

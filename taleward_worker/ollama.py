@@ -167,12 +167,22 @@ def _sicher_entpacken_zip(z: zipfile.ZipFile, ziel: Path) -> None:
     z.extractall(ziel)
 
 
+def protokoll_kuerzen(datei: Path, max_bytes: int = 2_000_000) -> None:
+    """ollama.log wächst sonst unbegrenzt (jede Anfrage eine Zeile) – beim Start eine Sicherung behalten."""
+    try:
+        if datei.exists() and datei.stat().st_size > max_bytes:
+            os.replace(datei, datei.with_suffix(".log.1"))
+    except OSError:
+        pass
+
+
 class OllamaDienst:
     """Das selbst verwaltete Ollama: starten, prüfen, beenden."""
 
     def __init__(self):
         self._prozess: subprocess.Popen | None = None
         self._sperre = threading.Lock()
+        self.fehler: str = ""  # letzter Startfehler, für die Oberfläche
         atexit.register(self.stoppen)
 
     @property
@@ -188,6 +198,11 @@ class OllamaDienst:
             return AUS
         if antwortet(FREMDE_ADRESSE):
             return FREMDE_ADRESSE
+        if not self.laeuft() and antwortet(self.eigene_adresse):
+            # Läuft schon – von einer abgestürzten App übrig geblieben oder von einem zweiten Benutzer. Ein zweiter
+            # Start könnte den Port nicht belegen; die vorhandene Instanz tut es genauso.
+            self.fehler = ""
+            return self.eigene_adresse
         if installiert() and self.starten():
             return self.eigene_adresse
         return AUS
@@ -198,15 +213,18 @@ class OllamaDienst:
                 return True
             p = programm()
             if p is None:
+                self.fehler = "programm_fehlt"
                 return False
             modellordner().mkdir(parents=True, exist_ok=True)
             env = {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{EIGENER_PORT}", "OLLAMA_MODELS": str(modellordner()),
                    "OLLAMA_KEEP_ALIVE": "2m", "OLLAMA_MAX_LOADED_MODELS": "1"}
+            protokoll_kuerzen(pfade.protokolle() / "ollama.log")
             log = open(pfade.protokolle() / "ollama.log", "ab")
             try:
                 self._prozess = subprocess.Popen([str(p), "serve"], stdout=log, stderr=subprocess.STDOUT, env=env,
                                                  cwd=str(p.parent), **prozesse.start_argumente())
-            except OSError:
+            except OSError as e:
+                self.fehler = f"start: {e}"
                 return False
             finally:
                 log.close()
@@ -214,10 +232,14 @@ class OllamaDienst:
         ende = time.monotonic() + warten_s
         while time.monotonic() < ende:
             if antwortet(self.eigene_adresse, 1.0):
+                self.fehler = ""
                 return True
             if not self.laeuft():
+                code = self._prozess.returncode if self._prozess else None
+                self.fehler = f"beendet (Code {code}) – Port {EIGENER_PORT} belegt? Einzelheiten in protokolle/ollama.log"
                 return False
             time.sleep(0.5)
+        self.fehler = f"antwortet nach {int(warten_s)} s nicht"
         return False
 
     def stoppen(self) -> None:

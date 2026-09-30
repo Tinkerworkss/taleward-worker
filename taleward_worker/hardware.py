@@ -84,6 +84,8 @@ STUFEN = [
 ]
 MIN_GRAFIK_MB = 2000   # darunter lohnt die Grafikkarte nicht – dann Prozessor
 MIN_RAM_GB = 8
+RECAPS_MIN_VRAM_MB = 6000  # ~6 GB für das 8-Milliarden-Modell auf der Grafikkarte …
+RECAPS_MIN_RAM_GB = 16     # … oder viel Arbeitsspeicher, dann auf dem Prozessor (langsam, aber es geht)
 CPU_DAUER = (240, 600)  # 4 h Aufnahme auf dem Prozessor: 4–10 Stunden, je nach Prozessor
 
 
@@ -139,6 +141,13 @@ def arbeitsspeicher_gb() -> float | None:
     return None
 
 
+def recaps_moeglich(vram_mb: int | None, ram_gb: float | None) -> bool:
+    """Reicht der Rechner für ein lokales Sprachmodell? Sonst dauert ein Recap Stunden und kippt in die Zeitgrenze."""
+    if vram_mb and vram_mb >= RECAPS_MIN_VRAM_MB:
+        return True
+    return ram_gb is None or ram_gb >= RECAPS_MIN_RAM_GB - 0.5
+
+
 def freier_platz_gb() -> float:
     return shutil.disk_usage(pfade.basis()).free / 1024 ** 3
 
@@ -157,6 +166,7 @@ def bericht() -> dict:
         "platzOk": platz >= PLATZ_KI_GB,
         "platzNoetigGb": PLATZ_KI_GB,
         "ramGb": round(ram, 1) if ram else None,
+        "recapsMoeglich": recaps_moeglich(k.vram_mb if k else None, ram),
         "ramOk": ram is None or ram >= MIN_RAM_GB - 0.5,
         "minRamGb": MIN_RAM_GB,
         "kerne": os.cpu_count() or 0,

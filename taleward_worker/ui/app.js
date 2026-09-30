@@ -324,9 +324,13 @@
     else if (inst && inst.phase === "fehler") text = t("ollama_fehler", { text: inst.fehler });
     else if (o.an && o.fremd) text = t("ollama_fremd");
     else if (o.an && o.laeuft) text = o.sprachmodell ? t("ollama_bereit_modell", { modell: o.sprachmodell }) : t("ollama_bereit");
+    else if (o.an && o.fehler) text = t("ollama_startfehler", { text: o.fehler });
     else if (o.an && o.installiert) text = t("ollama_startet");
+    else if (!o.an && o.moeglich === false) text = t("ollama_zu_schwach");
     $("#ollama-stand").textContent = text;
     $("#ollama-stand").hidden = !text;
+    const schalter = document.querySelector('[data-einstellung="recaps_lokal"]');
+    if (schalter) schalter.disabled = o.moeglich === false && !o.an;
     $("#ollama-entfernen").hidden = !o.installiert;
   }
 

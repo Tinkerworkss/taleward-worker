@@ -532,6 +532,21 @@ def geaenderte_pakete(ausgabe: str) -> list[str]:
     return namen
 
 
+PLATZ_RESERVE_GB = 3  # Luft für Windows und die Aufnahme, die gerade bearbeitet wird
+
+
+def platz_fehlt_gb(testmodus: bool, backend: str) -> float:
+    """Wie viele GB fehlen für die Installation? 0, wenn genug frei ist. Beim Aktualisieren liegt der alte Motor
+    noch da, und uv hält die entpackten Pakete im Zwischenspeicher – Spitze etwa das Doppelte des Pakets."""
+    system = "test" if testmodus else "cpu" if backend == "cpu" else ("windows" if sys.platform == "win32" else "linux")
+    noetig_gb = ERWARTET_MB[system] / 1024 * 2 + PLATZ_RESERVE_GB
+    try:
+        frei_gb = shutil.disk_usage(pfade.basis()).free / 1024 ** 3
+    except OSError:
+        return 0.0
+    return max(0.0, noetig_gb - frei_gb)
+
+
 def fehlercode(ausgabe: str) -> str:
     """Aus der letzten uv-Ausgabe einen Fehlercode für die Oberfläche machen (Texte in ui/texte.js, f_…)."""
     klein = ausgabe.lower()

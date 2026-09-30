@@ -269,3 +269,38 @@ def test_kleine_bibliotheksaenderung_geht_in_den_vorhandenen_motor(eigener_ordne
     monkeypatch.setattr(motor.subprocess, "run",
                         lambda b, **k: sp.CompletedProcess(b, 0, "Would install 2 packages\n + torch==2.9.0\n + x==1\n", ""))
     assert motor.Installation("0.4.21")._aenderung(motor.quelle("0.4.21"))[0] == "gross"
+
+
+def test_ollama_nimmt_vorhandene_eigene_instanz(monkeypatch):
+    from taleward_worker import ollama
+
+    d = ollama.OllamaDienst()
+    monkeypatch.setattr(ollama, "antwortet", lambda adresse, *a: adresse == d.eigene_adresse)
+    monkeypatch.setattr(ollama, "installiert", lambda: True)
+    monkeypatch.setattr(d, "starten", lambda *a, **k: (_ for _ in ()).throw(AssertionError("kein zweiter Start")))
+    assert d.adresse(True) == d.eigene_adresse
+    # nichts antwortet, Programm fehlt → AUS mit Grund
+    monkeypatch.setattr(ollama, "antwortet", lambda adresse, *a: False)
+    monkeypatch.setattr(ollama, "programm", lambda: None)
+    monkeypatch.setattr(d, "starten", ollama.OllamaDienst.starten.__get__(d))
+    assert d.adresse(True) == ollama.AUS and d.fehler == "programm_fehlt"
+
+
+def test_recaps_nur_mit_genug_hardware():
+    from taleward_worker import hardware
+
+    assert hardware.recaps_moeglich(8192, 16)
+    assert hardware.recaps_moeglich(None, 32)
+    assert not hardware.recaps_moeglich(4096, 8)
+    assert not hardware.recaps_moeglich(None, 8)
+    assert hardware.recaps_moeglich(None, None)  # unbekannt: nicht sperren
+
+
+def test_platzpruefung_vor_der_installation(monkeypatch):
+    from taleward_worker import motor
+
+    monkeypatch.setattr(motor.shutil, "disk_usage", lambda p: type("U", (), {"free": 5 * 1024 ** 3})())
+    assert motor.platz_fehlt_gb(False, "cuda") > 10
+    assert motor.platz_fehlt_gb(True, "cuda") == 0
+    monkeypatch.setattr(motor.shutil, "disk_usage", lambda p: type("U", (), {"free": 40 * 1024 ** 3})())
+    assert motor.platz_fehlt_gb(False, "cuda") == 0
