@@ -50,7 +50,7 @@ jobs:
           sed -i "s/^VERSION = .*/VERSION = \"$V\"/" taleward_worker/__init__.py
       - name: uv beilegen (installiert später das KI-Paket)
         env:
-          UV_VERSION: "0.9.5"
+          UV_VERSION: "0.12.19"
         run: |
           mkdir -p bin
           curl -fsSL -o uv.zip "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-pc-windows-msvc.zip"
