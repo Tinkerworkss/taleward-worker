@@ -199,3 +199,73 @@ def test_gescheiterter_tausch_wird_nicht_als_neue_fassung_gezaehlt(eigener_ordne
     inst._lauf()
     assert phasen == ["fehler"] and inst.fehler == "dateien_in_benutzung"
     assert json.loads((pfade.motor() / "taleward-motor.json").read_text())["fassung"] == "alt"
+
+
+def test_zertifikatsfehler_wird_erkannt(monkeypatch):
+    import ssl
+
+    innen = ssl.SSLCertVerificationError("certificate verify failed: unable to get local issuer certificate")
+    aussen = httpx.ConnectError("x")
+    aussen.__cause__ = innen
+    assert server.zertifikatsfehler(aussen)
+    assert not server.zertifikatsfehler(httpx.ConnectError("Connection refused"))
+
+    def antwort(req: httpx.Request):
+        raise aussen
+
+    monkeypatch.setattr(server, "_klient", lambda: httpx.Client(transport=httpx.MockTransport(antwort)))
+    with pytest.raises(server.ServerFehler) as e:
+        server.pruefen("https://x")
+    assert e.value.code == "zertifikat"
+    with pytest.raises(server.ServerFehler) as e:
+        server.konfiguration("https://x", "t")
+    assert e.value.code == "zertifikat"
+
+
+def test_fenster_passt_auf_kleine_bildschirme():
+    from taleward_worker.oberflaeche import fenstergroesse, webview2_vorhanden
+
+    assert fenstergroesse(None) == (560, 760, (460, 600))
+    assert fenstergroesse(1080) == (560, 760, (460, 600))
+    b, h, mind = fenstergroesse(614)  # 1366×768 bei 125 %
+    assert h == 534 and mind == (460, 534)
+    assert fenstergroesse(512)[1] == 432  # 150 %
+    assert webview2_vorhanden() or sys.platform == "win32"
+
+
+def test_kleine_bibliotheksaenderung_geht_in_den_vorhandenen_motor(eigener_ordner, monkeypatch):
+    """Kommt nur ein kleines Paket dazu (truststore), wird es eingespielt – kein neues 8-GB-Paket."""
+    import json
+    import subprocess as sp
+
+    from taleward_worker import motor, pfade
+
+    assert motor.geaenderte_pakete(" + truststore==0.10.4\n - alt==1\nWould install 1 package") == ["truststore", "alt"]
+    assert motor.schwer("torch==2.8.0") and motor.schwer("nvidia-cudnn-cu12") and not motor.schwer("truststore")
+
+    py = pfade.motor_python()
+    py.parent.mkdir(parents=True, exist_ok=True)
+    py.write_text("")
+    (pfade.motor() / "taleward-motor.json").write_text(json.dumps({"fassung": "0.4.19", "backend": "cuda"}))
+    monkeypatch.setattr(motor, "quelle", lambda f: {"ref": f"v{f}", "genau": True, "paket": "paket.zip",
+                                                    "anforderungen": "egal"})
+    monkeypatch.setattr(motor, "anforderungen_lesen", lambda q: "torch==2.8.0\ntruststore==0.10.4\n")
+    monkeypatch.setattr(motor, "uv_programm", lambda: "uv")
+
+    def run(befehl, **kw):
+        if "--dry-run" in befehl:
+            return sp.CompletedProcess(befehl, 0, "Would install 1 package\n + truststore==0.10.4\n", "")
+        return sp.CompletedProcess(befehl, 0, "ok\n", "")
+
+    monkeypatch.setattr(motor.subprocess, "run", run)
+    uv = []
+    monkeypatch.setattr(motor.Installation, "_uv", lambda self, *a, **k: uv.append(a))
+    inst = motor.Installation("0.4.20")
+    inst._lauf()
+    assert inst.phase == "fertig" and motor.installiert()["fassung"] == "0.4.20"
+    assert len(uv) == 2 and "-r" in uv[0] and "--torch-backend" in uv[0] and "--reinstall" in uv[1]
+
+    # torch dabei → vollständige Installation
+    monkeypatch.setattr(motor.subprocess, "run",
+                        lambda b, **k: sp.CompletedProcess(b, 0, "Would install 2 packages\n + torch==2.9.0\n + x==1\n", ""))
+    assert motor.Installation("0.4.21")._aenderung(motor.quelle("0.4.21"))[0] == "gross"

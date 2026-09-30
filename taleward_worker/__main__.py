@@ -18,6 +18,7 @@ def main() -> int:
         print("Taleward Worker ok:", ui.exists(), hardware.bericht()["system"])
         return 0 if ui.exists() else 1
     _fehler_sichtbar_machen()
+    _systemzertifikate()
     try:
         from taleward_worker.oberflaeche import WorkerApp
 
@@ -47,6 +48,17 @@ def _fehler_sichtbar_machen() -> None:
         logging.getLogger("taleward_worker").error("Thread %s abgestürzt:\n%s", getattr(args.thread, "name", "?"), text)
 
     threading.excepthook = thread_fehler
+
+
+def _systemzertifikate() -> None:
+    """Zertifikate aus dem Speicher des Betriebssystems – Virenscanner mit HTTPS-Prüfung (Kaspersky, ESET, Avast …)
+    und Firmen-Proxys schieben eigene Stammzertifikate dazwischen, die das mitgelieferte certifi-Bündel nicht kennt."""
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception as e:  # noqa: BLE001 – dann eben nur certifi
+        logging.getLogger("taleward_worker").warning("Systemzertifikate nicht nutzbar: %s", e)
 
 
 def absturz_melden(text: str) -> None:

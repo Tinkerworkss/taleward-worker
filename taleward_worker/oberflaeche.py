@@ -387,6 +387,9 @@ class WorkerApp:
 
     def beenden(self) -> None:
         self._beendet.set()
+        for inst in (self.installation, self.ollama_installation):
+            if inst is not None:
+                inst.abbrechen()  # sonst schreibt uv nach dem Ende der App minutenlang weiter in motor-neu
         self.dienst.stoppen()
         self.dienst.ollama.stoppen()
         if self.tray is not None:
@@ -472,12 +475,16 @@ class WorkerApp:
         if einzeln.andere_wecken():
             return
         einzeln.lauschen(self.zeigen)
+        if not webview2_vorhanden():
+            webview2_fehlt_melden()
+            return
         self.hardware = hardware.bericht()
         self._tray_starten()
         versteckt = self.hintergrund and self.e.gekoppelt
+        breite, hoehe, mindestens = fenstergroesse(bildschirm_hoehe())
         self.fenster = webview.create_window(
             "Taleward Worker", str(pfade.ressourcen() / "ui" / "index.html"), js_api=Api(self),
-            width=560, height=760, min_size=(460, 600), background_color="#F2E8D5",
+            width=breite, height=hoehe, min_size=mindestens, background_color="#F2E8D5",
             hidden=versteckt and self.tray is not None, minimized=versteckt and self.tray is None)
         self.fenster.events.closing += self._beim_schliessen
         threading.Thread(target=self._hintergrund_pflege, daemon=True, name="pflege").start()
@@ -510,3 +517,58 @@ def tray_titel(d: dict, sprache: str) -> str:
     }
     de_text, en_text = texte.get(art, ("Taleward Worker", "Taleward Worker"))
     return "Taleward Worker – " + (en_text if en else de_text)
+
+
+# ---------------------------------------------------------------------- Fenster und Browser-Kern
+FENSTER = (560, 760)
+FENSTER_MINDESTENS = (460, 600)
+WEBVIEW2_LINK = "https://developer.microsoft.com/microsoft-edge/webview2/"
+
+
+def bildschirm_hoehe() -> int | None:
+    try:
+        import webview
+
+        return int(webview.screens[0].height) if webview.screens else None
+    except Exception:  # noqa: BLE001 – dann die Vorgabe
+        return None
+
+
+def fenstergroesse(bildschirm: int | None) -> tuple[int, int, tuple[int, int]]:
+    """Fenstergröße so, dass es auch auf 1366×768 bei 125 % Skalierung (≈ 614 logische Pixel) ganz sichtbar ist –
+    die Knöpfe „Weiter“ und „Installieren“ sitzen unten."""
+    breite, hoehe = FENSTER
+    if not bildschirm:
+        return breite, hoehe, FENSTER_MINDESTENS
+    nutzbar = max(400, bildschirm - 80)  # Taskleiste und Fensterrahmen
+    return breite, min(hoehe, nutzbar), (FENSTER_MINDESTENS[0], min(FENSTER_MINDESTENS[1], nutzbar))
+
+
+def webview2_vorhanden() -> bool:
+    """Windows: pywebview fiele ohne WebView2 still auf den alten Internet-Explorer-Kern zurück, der unsere
+    Oberfläche nicht ausführen kann – das Fenster bliebe leer, ohne jede Meldung."""
+    if sys.platform != "win32":
+        return True
+    try:
+        from webview.platforms import winforms
+
+        return bool(getattr(winforms, "is_chromium", True))
+    except Exception:  # noqa: BLE001 – lieber starten als fälschlich blockieren
+        return True
+
+
+def webview2_fehlt_melden() -> None:
+    log.error("WebView2 fehlt – Oberfläche kann nicht starten")
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        antwort = ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
+            None, "Taleward Worker braucht die Microsoft-Komponente „WebView2“, die auf diesem PC fehlt.\n\n"
+            "Jetzt die Download-Seite öffnen? (Installieren, dann Taleward Worker erneut starten.)",
+            "Taleward Worker", 0x14)  # MB_YESNO | MB_ICONERROR
+        if antwort == 6:  # IDYES
+            webbrowser.open(WEBVIEW2_LINK)
+    except Exception:  # noqa: BLE001
+        pass

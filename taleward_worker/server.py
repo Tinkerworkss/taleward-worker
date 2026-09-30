@@ -39,6 +39,31 @@ def unverschluesselt(adresse: str) -> bool:
     return t.scheme == "http" and t.hostname not in ("localhost", "127.0.0.1", "::1")
 
 
+def zertifikatsfehler(e: BaseException) -> bool:
+    """Steckt hinter dem Verbindungsfehler ein abgelehntes Zertifikat? Typisch: Virenscanner mit HTTPS-Prüfung
+    oder Firmen-Proxy schieben ein eigenes Stammzertifikat dazwischen; der Browser kennt es, wir sonst nicht."""
+    import ssl
+
+    ursache: BaseException | None = e
+    for _ in range(5):
+        if ursache is None:
+            break
+        if isinstance(ursache, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(ursache):
+            return True
+        ursache = ursache.__cause__ or ursache.__context__
+    return False
+
+
+def _verbindungsfehler(e: httpx.HTTPError) -> ServerFehler:
+    if zertifikatsfehler(e):
+        return ServerFehler("zertifikat")
+    if isinstance(e, httpx.TimeoutException):
+        return ServerFehler("zeitueberschreitung")
+    if isinstance(e, httpx.ConnectError):
+        return ServerFehler("nicht_erreichbar")
+    return ServerFehler("kein_taleward")
+
+
 def pruefen(adresse: str) -> dict:
     """Ist dort ein Taleward-Server? Liefert Name und API-Fassung."""
     try:
@@ -50,11 +75,9 @@ def pruefen(adresse: str) -> dict:
                 raise ServerFehler("kein_taleward")
             info = k.get(f"{adresse}/api/v1/info")
             daten = info.json() if info.status_code == 200 else {}
-    except httpx.ConnectError:
-        raise ServerFehler("nicht_erreichbar") from None
-    except httpx.TimeoutException:
-        raise ServerFehler("zeitueberschreitung") from None
-    except (httpx.HTTPError, ValueError):
+    except httpx.HTTPError as e:
+        raise _verbindungsfehler(e) from None
+    except ValueError:
         raise ServerFehler("kein_taleward") from None
     return {"name": daten.get("serverName") or daten.get("name") or "", "apiVersion": daten.get("apiVersion", "")}
 
@@ -66,8 +89,8 @@ def koppeln(adresse: str, code: str, name: str) -> dict:
     try:
         with _klient() as k:
             r = k.post(f"{adresse}/worker/v1/pair", json={"code": code, "name": name.strip()[:60] or "worker"})
-    except httpx.HTTPError:
-        raise ServerFehler("nicht_erreichbar") from None
+    except httpx.HTTPError as e:
+        raise _verbindungsfehler(e) from None
     if r.status_code != 201:
         try:
             d = r.json()
@@ -94,8 +117,8 @@ def konfiguration(adresse: str, token: str) -> dict:
     try:
         with _klient() as k:
             r = k.get(f"{adresse}/worker/v1/config", headers={"Authorization": f"Bearer {token}"})
-    except httpx.HTTPError:
-        raise ServerFehler("nicht_erreichbar") from None
+    except httpx.HTTPError as e:
+        raise _verbindungsfehler(e) from None
     if r.status_code == 401:
         raise ServerFehler("abgelehnt")
     if r.status_code != 200:

@@ -61,6 +61,12 @@ def uv_programm() -> str:
     raise MotorFehler("uv_fehlt")
 
 
+def _netzcode(e: httpx.HTTPError) -> str:
+    from taleward_worker.server import zertifikatsfehler
+
+    return "zertifikat" if zertifikatsfehler(e) else "github_nicht_erreichbar"
+
+
 def quelle(fassung: str) -> dict:
     """Download-Adressen für eine Serverfassung. Gibt es kein passendes Git-Tag (v0.4.0), gilt der main-Zweig."""
     eigen = os.environ.get("TALEWARD_MOTOR_QUELLE")  # Entwicklung: lokaler Ordner des Server-Codes
@@ -72,8 +78,8 @@ def quelle(fassung: str) -> dict:
         for ref in kandidaten:
             try:
                 r = k.head(f"https://raw.githubusercontent.com/{REPO}/{ref}/engine-requirements.txt")
-            except httpx.HTTPError:
-                raise MotorFehler("github_nicht_erreichbar") from None
+            except httpx.HTTPError as e:
+                raise MotorFehler(_netzcode(e)) from None
             if r.status_code == 200:
                 return _adressen(ref, genau=True)
     return _adressen("main", genau=False)
@@ -133,7 +139,8 @@ class Installation:
 
     def _umgebung(self) -> dict:
         env = saubere_umgebung()
-        env.update({"UV_NO_CONFIG": "1", "UV_CACHE_DIR": str(pfade.basis() / "cache"),
+        env.update({"UV_NO_CONFIG": "1", "UV_NATIVE_TLS": "1",  # Zertifikate aus dem Windows-Speicher (Virenscanner)
+                    "UV_CACHE_DIR": str(pfade.basis() / "cache"),
                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
                     "UV_PYTHON_PREFERENCE": "only-managed",
                     "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "hardlink"})  # kein zweites Exemplar: spart während der Installation ~8 GB
@@ -181,8 +188,12 @@ class Installation:
     def _installieren(self) -> None:
         q = quelle(self.fassung)
         self.zeilen.append(f"Fassung {self.fassung} → {q['ref']}" + ("" if q["genau"] else " (kein Tag, main)"))
-        if not self.testmodus and self._nur_taleward_noetig(q):
-            return self._nur_taleward(q)
+        if not self.testmodus:
+            art, pakete = self._aenderung(q)
+            if art == "gleich":
+                return self._nur_taleward(q)
+            if art == "klein":  # nur kleine Bibliotheken neu – in den vorhandenen Motor, statt 8 GB neu zu laden
+                return self._nur_taleward(q, zusatz=pakete)
         system = "test" if self.testmodus else "cpu" if self.backend == "cpu" else (
             "windows" if sys.platform == "win32" else "linux")
         self.erwartet_mb = ERWARTET_MB[system]
@@ -255,11 +266,15 @@ class Installation:
 
     # ------------------------------------------------------------------ Schneller Weg bei neuer Serverfassung
     def _nur_taleward_noetig(self, q: dict) -> bool:
-        """Sind die KI-Bibliotheken der neuen Fassung dieselben wie im installierten Motor? Dann reicht es, nur den
-        Taleward-Code zu tauschen (Sekunden statt 8 GB). Geprüft mit einem Probelauf von uv gegen den Motor."""
+        return self._aenderung(q)[0] == "gleich"
+
+    def _aenderung(self, q: dict) -> tuple[str, list[str]]:
+        """Was hat sich an den KI-Bibliotheken gegenüber dem installierten Motor geändert? Probelauf von uv:
+        „gleich“ (nur Taleward-Code tauschen, Sekunden), „klein“ (ein paar kleine Pakete – in den vorhandenen Motor)
+        oder „gross“ (torch/CUDA anders – vollständige Installation, 8 GB)."""
         inst = installiert()
         if not inst or inst.get("testmodus") or inst.get("backend", "cuda") != self.backend:
-            return False
+            return "gross", []
         try:
             basis, extra = anforderungen_aufteilen(anforderungen_lesen(q["anforderungen"]))
             ordner = pfade.basis() / "cache"
@@ -271,21 +286,36 @@ class Installation:
                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
                                  env=self._umgebung(), cwd=pfade.basis(), **_ohne_fenster())
         except (MotorFehler, OSError, subprocess.SubprocessError):
-            return False
+            return "gross", []
         ausgabe = res.stdout + res.stderr
-        gleich = res.returncode == 0 and "Would make no changes" in ausgabe
-        self.zeilen.append("KI-Bibliotheken unverändert – nur der Taleward-Code wird getauscht." if gleich
-                           else "KI-Bibliotheken haben sich geändert – vollständige Installation.")
-        return gleich
+        if res.returncode != 0:
+            self.zeilen.append("Probelauf gescheitert – vollständige Installation.")
+            return "gross", []
+        if "Would make no changes" in ausgabe:
+            self.zeilen.append("KI-Bibliotheken unverändert – nur der Taleward-Code wird getauscht.")
+            return "gleich", []
+        pakete = geaenderte_pakete(ausgabe)
+        if pakete and not any(schwer(p) for p in pakete):
+            self.zeilen.append("Kleine Änderung an den KI-Bibliotheken (" + ", ".join(pakete) +
+                               ") – wird in das vorhandene KI-Paket eingespielt.")
+            return "klein", pakete
+        self.zeilen.append("KI-Bibliotheken haben sich geändert – vollständige Installation.")
+        return "gross", pakete
 
-    def _nur_taleward(self, q: dict) -> None:
+    def _nur_taleward(self, q: dict, zusatz: list[str] | None = None) -> None:
         self.phase = "taleward"
         py = str(pfade.motor_python())
         if callable(self.vor_tausch):
             self.vor_tausch()  # laufenden Worker anhalten (nur für wenige Sekunden)
         try:
+            if zusatz:
+                self.phase = "pakete"
+                torch = "cpu" if self.backend == "cpu" else TORCH_BACKEND
+                self._uv("pip", "install", "--python", py, "--no-deps", "--torch-backend", torch,
+                         "-r", str(pfade.basis() / "cache" / "pruefen.txt"), anteil_von=0.1, anteil_bis=0.6)
+                self.phase = "taleward"
             self._uv("pip", "install", "--python", py, "--no-deps", "--reinstall", q["paket"],
-                     anteil_von=0.1, anteil_bis=0.9)
+                     anteil_von=0.6 if zusatz else 0.1, anteil_bis=0.9)
             pruefung = _python_pruefen(py, "import app, sys; print('ok')")
             if "ok" not in pruefung.stdout:
                 raise MotorFehler("installation", pruefung.stderr[-2000:])
@@ -413,8 +443,8 @@ def anforderungen_lesen(quelle: str) -> str:
     if quelle.startswith(("http://", "https://")):
         try:
             r = httpx.get(quelle, timeout=30, follow_redirects=True, headers={"User-Agent": f"TalewardWorker/{VERSION}"})
-        except httpx.HTTPError:
-            raise MotorFehler("github_nicht_erreichbar") from None
+        except httpx.HTTPError as e:
+            raise MotorFehler(_netzcode(e)) from None
         if r.status_code != 200:
             raise MotorFehler("installation", f"engine-requirements.txt: HTTP {r.status_code}")
         return r.text
@@ -479,6 +509,27 @@ def torch_pruefen(py: str) -> dict:
         return json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"fehler": (r.stderr or r.stdout)[-1000:].strip() or "PyTorch antwortet nicht."}
+
+
+SCHWERE_PAKETE = ("torch", "torchaudio", "torchvision", "nvidia-", "triton", "ctranslate2", "onnxruntime",
+                  "cudnn", "cublas", "cuda-")
+
+
+def schwer(paket: str) -> bool:
+    name = paket.lower().split("==")[0].strip()
+    return any(name.startswith(s) or name == s.rstrip("-") for s in SCHWERE_PAKETE)
+
+
+def geaenderte_pakete(ausgabe: str) -> list[str]:
+    """Aus dem uv-Probelauf („ + paket==1.0“, „ - paket==0.9“) die betroffenen Paketnamen."""
+    namen: list[str] = []
+    for zeile in ausgabe.splitlines():
+        z = zeile.strip()
+        if z[:2] in ("+ ", "- ") and len(z) > 2:
+            name = z[2:].split("==")[0].split(" ")[0].strip()
+            if name and name not in namen:
+                namen.append(name)
+    return namen
 
 
 def fehlercode(ausgabe: str) -> str:

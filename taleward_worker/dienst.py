@@ -213,6 +213,7 @@ class Dienst:
             "CPU_THREADS": str(max(1, (os.cpu_count() or 2) - 1)) if wahl["geraet"] == "cpu" else "0",
             "WORKER_SERVER_URL": self.e.server, "WORKER_TOKEN": self.e.token,
             "WORKER_WORK_DIR": str(pfade.arbeit()), "HF_HOME": str(pfade.modelle()),
+            "TORCH_HOME": str(pfade.modelle() / "torch"),  # Ausrichtungsmodell (~360 MB) nicht in %USERPROFILE%\.cache
             "DATA_DIR": str(pfade.basis() / "motor-daten"),
             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
