@@ -1,0 +1,307 @@
+From a360c82a1cb6dca5350b2a3521d1cadf24e7f8e2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 06:52:57 +0200
+Subject: [PATCH 17/18] =?UTF-8?q?Ollama=20robuster,=20Hardware-H=C3=BCrde?=
+ =?UTF-8?q?=20f=C3=BCr=20lokale=20Recaps,=20Platzpr=C3=BCfung=20vor=20der?=
+ =?UTF-8?q?=20Installation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Läuft schon ein eigenes Ollama (nach einem App-Absturz oder von einem zweiten Benutzer), wird es genutzt statt
+  einen zweiten Start scheitern zu lassen; Startfehler stehen in der Oberfläche statt „ist eingerichtet“.
+- Fehlt Ollama oder ist es nach einem App-Update veraltet, lädt die App es im Hintergrund nach – Recaps wanderten
+  sonst still auf den Server. ollama.log wird beim Start gekürzt.
+- „Recaps hier schreiben“ nur mit ≥ 6 GB Grafikspeicher oder ≥ 16 GB Arbeitsspeicher; darunter steht, warum.
+- Vor der Installation wird der freie Platz geprüft (etwa doppeltes Paket plus 3 GB Luft) – ein voller Datenträger
+  brach sonst mittendrin ab, und der Fehlertext war nichtssagend.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ taleward_worker/hardware.py    | 10 ++++++++++
+ taleward_worker/motor.py       | 15 +++++++++++++++
+ taleward_worker/oberflaeche.py | 26 ++++++++++++++++++++++++-
+ taleward_worker/ollama.py      | 24 ++++++++++++++++++++++-
+ taleward_worker/ui/app.js      |  4 ++++
+ taleward_worker/ui/texte.js    |  2 ++
+ tests/test_robustheit.py       | 35 ++++++++++++++++++++++++++++++++++
+ 7 files changed, 114 insertions(+), 2 deletions(-)
+
+diff --git a/taleward_worker/hardware.py b/taleward_worker/hardware.py
+index aa8ae7f..443bae4 100644
+--- a/taleward_worker/hardware.py
++++ b/taleward_worker/hardware.py
+@@ -84,6 +84,8 @@ STUFEN = [
+ ]
+ MIN_GRAFIK_MB = 2000   # darunter lohnt die Grafikkarte nicht – dann Prozessor
+ MIN_RAM_GB = 8
++RECAPS_MIN_VRAM_MB = 6000  # ~6 GB für das 8-Milliarden-Modell auf der Grafikkarte …
++RECAPS_MIN_RAM_GB = 16     # … oder viel Arbeitsspeicher, dann auf dem Prozessor (langsam, aber es geht)
+ CPU_DAUER = (240, 600)  # 4 h Aufnahme auf dem Prozessor: 4–10 Stunden, je nach Prozessor
+ 
+ 
+@@ -139,6 +141,13 @@ def arbeitsspeicher_gb() -> float | None:
+     return None
+ 
+ 
++def recaps_moeglich(vram_mb: int | None, ram_gb: float | None) -> bool:
++    """Reicht der Rechner für ein lokales Sprachmodell? Sonst dauert ein Recap Stunden und kippt in die Zeitgrenze."""
++    if vram_mb and vram_mb >= RECAPS_MIN_VRAM_MB:
++        return True
++    return ram_gb is None or ram_gb >= RECAPS_MIN_RAM_GB - 0.5
++
++
+ def freier_platz_gb() -> float:
+     return shutil.disk_usage(pfade.basis()).free / 1024 ** 3
+ 
+@@ -157,6 +166,7 @@ def bericht() -> dict:
+         "platzOk": platz >= PLATZ_KI_GB,
+         "platzNoetigGb": PLATZ_KI_GB,
+         "ramGb": round(ram, 1) if ram else None,
++        "recapsMoeglich": recaps_moeglich(k.vram_mb if k else None, ram),
+         "ramOk": ram is None or ram >= MIN_RAM_GB - 0.5,
+         "minRamGb": MIN_RAM_GB,
+         "kerne": os.cpu_count() or 0,
+diff --git a/taleward_worker/motor.py b/taleward_worker/motor.py
+index 693e156..bcd0664 100644
+--- a/taleward_worker/motor.py
++++ b/taleward_worker/motor.py
+@@ -532,6 +532,21 @@ def geaenderte_pakete(ausgabe: str) -> list[str]:
+     return namen
+ 
+ 
++PLATZ_RESERVE_GB = 3  # Luft für Windows und die Aufnahme, die gerade bearbeitet wird
++
++
++def platz_fehlt_gb(testmodus: bool, backend: str) -> float:
++    """Wie viele GB fehlen für die Installation? 0, wenn genug frei ist. Beim Aktualisieren liegt der alte Motor
++    noch da, und uv hält die entpackten Pakete im Zwischenspeicher – Spitze etwa das Doppelte des Pakets."""
++    system = "test" if testmodus else "cpu" if backend == "cpu" else ("windows" if sys.platform == "win32" else "linux")
++    noetig_gb = ERWARTET_MB[system] / 1024 * 2 + PLATZ_RESERVE_GB
++    try:
++        frei_gb = shutil.disk_usage(pfade.basis()).free / 1024 ** 3
++    except OSError:
++        return 0.0
++    return max(0.0, noetig_gb - frei_gb)
++
++
+ def fehlercode(ausgabe: str) -> str:
+     """Aus der letzten uv-Ausgabe einen Fehlercode für die Oberfläche machen (Texte in ui/texte.js, f_…)."""
+     klein = ausgabe.lower()
+diff --git a/taleward_worker/oberflaeche.py b/taleward_worker/oberflaeche.py
+index ea822b2..27b4f64 100644
+--- a/taleward_worker/oberflaeche.py
++++ b/taleward_worker/oberflaeche.py
+@@ -267,7 +267,8 @@ class WorkerApp:
+                                     if not self.dienst.ollama.laeuft() else False)
+         inst = self.ollama_installation
+         return {"an": self.e.recaps_lokal, "installiert": ollama.installiert(), "laeuft": self.dienst.ollama.laeuft(),
+-                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG,
++                "fremd": self._fremd_geprueft[1], "fassung": ollama.FASSUNG, "fehler": self.dienst.ollama.fehler,
++                "moeglich": bool((self.hardware or {}).get("recapsMoeglich", True)),
+                 "installation": inst.stand() if inst and inst.phase != "fertig" else None,
+                 "sprachmodell": self.dienst.info.get("llm")}
+ 
+@@ -276,6 +277,14 @@ class WorkerApp:
+             return
+         self.e.testmodus = testmodus
+         self.e.speichern()
++        fehlt_gb = motor.platz_fehlt_gb(testmodus, "cpu" if self.e.geraet == "cpu" else "cuda")
++        if fehlt_gb:
++            # Gar nicht erst anfangen: ein voller Datenträger bricht mittendrin ab, und Windows selbst leidet
++            self.installation = motor.Installation(self.server_version or "", testmodus=testmodus)
++            self.installation.phase, self.installation.fehler = "fehler", "kein_platz"
++            self.installation.fehlertext = f"Es fehlen etwa {fehlt_gb:.0f} GB freier Speicherplatz."
++            self.dienst.protokoll.schreiben(f"Installation nicht gestartet: {self.installation.fehlertext}")
++            return
+         war_aktiv = {"an": False}
+ 
+         def vor():
+@@ -312,6 +321,20 @@ class WorkerApp:
+             if self.dienst.zustand.get("art") != "arbeitet" and not laeuft_installation:
+                 self.installieren(self.e.testmodus)
+ 
++    def _ollama_pruefen(self) -> None:
++        """Lokale Recaps gewünscht, aber Ollama fehlt oder hat eine alte Fassung (nach einem App-Update)? Dann
++        nachladen – sonst wanderten die Recaps still auf den Server, und die Oberfläche zeigte nichts."""
++        if not self.e.recaps_lokal or not self.e.gekoppelt or self.e.testmodus:
++            return
++        if ollama.installiert() or ollama.antwortet(ollama.FREMDE_ADRESSE):
++            return
++        if self.ollama_installation and self.ollama_installation.phase not in ("fertig", "fehler"):
++            return
++        if self.ollama_installation and self.ollama_installation.phase == "fehler":
++            return  # nicht im Kreis laden – der Nutzer sieht den Fehler und kann neu anstoßen
++        self.dienst.protokoll.schreiben("Ollama fehlt oder ist veraltet – wird geladen")
++        self.ollama_installieren()
++
+     def _hintergrund_pflege(self) -> None:
+         """Beim Start: Fassung prüfen, ggf. Motor aktualisieren, Worker starten. Danach alle 5 Minuten die
+         Serverfassung (ein kleiner Abruf – so zieht das KI-Paket kurz nach einem Server-Update nach) und alle
+@@ -321,6 +344,7 @@ class WorkerApp:
+         while not self._beendet.is_set():
+             try:
+                 self._motor_pruefen(erster)
++                self._ollama_pruefen()
+                 if time.time() >= naechste_app_pruefung and self.e.gekoppelt:
+                     self.app_update_pruefen()
+                     naechste_app_pruefung = time.time() + UPDATE_PRUEFEN_ALLE
+diff --git a/taleward_worker/ollama.py b/taleward_worker/ollama.py
+index 68c6ca1..9721505 100644
+--- a/taleward_worker/ollama.py
++++ b/taleward_worker/ollama.py
+@@ -167,12 +167,22 @@ def _sicher_entpacken_zip(z: zipfile.ZipFile, ziel: Path) -> None:
+     z.extractall(ziel)
+ 
+ 
++def protokoll_kuerzen(datei: Path, max_bytes: int = 2_000_000) -> None:
++    """ollama.log wächst sonst unbegrenzt (jede Anfrage eine Zeile) – beim Start eine Sicherung behalten."""
++    try:
++        if datei.exists() and datei.stat().st_size > max_bytes:
++            os.replace(datei, datei.with_suffix(".log.1"))
++    except OSError:
++        pass
++
++
+ class OllamaDienst:
+     """Das selbst verwaltete Ollama: starten, prüfen, beenden."""
+ 
+     def __init__(self):
+         self._prozess: subprocess.Popen | None = None
+         self._sperre = threading.Lock()
++        self.fehler: str = ""  # letzter Startfehler, für die Oberfläche
+         atexit.register(self.stoppen)
+ 
+     @property
+@@ -188,6 +198,11 @@ class OllamaDienst:
+             return AUS
+         if antwortet(FREMDE_ADRESSE):
+             return FREMDE_ADRESSE
++        if not self.laeuft() and antwortet(self.eigene_adresse):
++            # Läuft schon – von einer abgestürzten App übrig geblieben oder von einem zweiten Benutzer. Ein zweiter
++            # Start könnte den Port nicht belegen; die vorhandene Instanz tut es genauso.
++            self.fehler = ""
++            return self.eigene_adresse
+         if installiert() and self.starten():
+             return self.eigene_adresse
+         return AUS
+@@ -198,15 +213,18 @@ class OllamaDienst:
+                 return True
+             p = programm()
+             if p is None:
++                self.fehler = "programm_fehlt"
+                 return False
+             modellordner().mkdir(parents=True, exist_ok=True)
+             env = {**os.environ, "OLLAMA_HOST": f"127.0.0.1:{EIGENER_PORT}", "OLLAMA_MODELS": str(modellordner()),
+                    "OLLAMA_KEEP_ALIVE": "2m", "OLLAMA_MAX_LOADED_MODELS": "1"}
++            protokoll_kuerzen(pfade.protokolle() / "ollama.log")
+             log = open(pfade.protokolle() / "ollama.log", "ab")
+             try:
+                 self._prozess = subprocess.Popen([str(p), "serve"], stdout=log, stderr=subprocess.STDOUT, env=env,
+                                                  cwd=str(p.parent), **prozesse.start_argumente())
+-            except OSError:
++            except OSError as e:
++                self.fehler = f"start: {e}"
+                 return False
+             finally:
+                 log.close()
+@@ -214,10 +232,14 @@ class OllamaDienst:
+         ende = time.monotonic() + warten_s
+         while time.monotonic() < ende:
+             if antwortet(self.eigene_adresse, 1.0):
++                self.fehler = ""
+                 return True
+             if not self.laeuft():
++                code = self._prozess.returncode if self._prozess else None
++                self.fehler = f"beendet (Code {code}) – Port {EIGENER_PORT} belegt? Einzelheiten in protokolle/ollama.log"
+                 return False
+             time.sleep(0.5)
++        self.fehler = f"antwortet nach {int(warten_s)} s nicht"
+         return False
+ 
+     def stoppen(self) -> None:
+diff --git a/taleward_worker/ui/app.js b/taleward_worker/ui/app.js
+index f293293..4458e2e 100644
+--- a/taleward_worker/ui/app.js
++++ b/taleward_worker/ui/app.js
+@@ -324,9 +324,13 @@
+     else if (inst && inst.phase === "fehler") text = t("ollama_fehler", { text: inst.fehler });
+     else if (o.an && o.fremd) text = t("ollama_fremd");
+     else if (o.an && o.laeuft) text = o.sprachmodell ? t("ollama_bereit_modell", { modell: o.sprachmodell }) : t("ollama_bereit");
++    else if (o.an && o.fehler) text = t("ollama_startfehler", { text: o.fehler });
+     else if (o.an && o.installiert) text = t("ollama_startet");
++    else if (!o.an && o.moeglich === false) text = t("ollama_zu_schwach");
+     $("#ollama-stand").textContent = text;
+     $("#ollama-stand").hidden = !text;
++    const schalter = document.querySelector('[data-einstellung="recaps_lokal"]');
++    if (schalter) schalter.disabled = o.moeglich === false && !o.an;
+     $("#ollama-entfernen").hidden = !o.installiert;
+   }
+ 
+diff --git a/taleward_worker/ui/texte.js b/taleward_worker/ui/texte.js
+index 5ead7bf..25f3c88 100644
+--- a/taleward_worker/ui/texte.js
++++ b/taleward_worker/ui/texte.js
+@@ -8,6 +8,7 @@ window.TEXTE = {
+     ollama_bereit: "Bereit.", ollama_bereit_modell: "Bereit – Sprachmodell {modell}.",
+     ollama_fremd: "Nutzt das vorhandene Ollama auf diesem PC.", ollama_fehler: "Ollama ließ sich nicht einrichten: {text}",
+     ollama_startet: "Ollama ist eingerichtet und startet mit dem Worker.",
++    ollama_startfehler: "Ollama läuft nicht: {text}", ollama_zu_schwach: "Dafür braucht der PC eine Grafikkarte mit mindestens 6 GB oder 16 GB Arbeitsspeicher – sonst dauert ein Recap Stunden. Der Server übernimmt die Recaps.",
+     speicher_ollama: "Ollama mit Sprachmodell {mb}.", ollama_entfernen: "Ollama entfernen",
+     bestaetigen_ollama: "Ollama und das Sprachmodell von diesem PC entfernen?",
+     "Recaps": "Recaps", recaps_lokal: "hier, mit {modell}", recaps_server: "macht der Server bzw. ein anderer Worker",
+@@ -135,6 +136,7 @@ window.TEXTE = {
+     ollama_bereit: "Ready.", ollama_bereit_modell: "Ready – language model {modell}.",
+     ollama_fremd: "Uses the Ollama already installed on this PC.", ollama_fehler: "Ollama could not be set up: {text}",
+     ollama_startet: "Ollama is set up and starts with the worker.",
++    ollama_startfehler: "Ollama is not running: {text}", ollama_zu_schwach: "This needs a graphics card with at least 6 GB or 16 GB of RAM – otherwise a recap takes hours. The server handles recaps instead.",
+     speicher_ollama: "Ollama with language model {mb}.", ollama_entfernen: "Remove Ollama",
+     bestaetigen_ollama: "Remove Ollama and the language model from this PC?",
+     "Recaps": "Recaps", recaps_lokal: "here, with {modell}", recaps_server: "done by the server or another worker",
+diff --git a/tests/test_robustheit.py b/tests/test_robustheit.py
+index d4e7b91..c93f99b 100644
+--- a/tests/test_robustheit.py
++++ b/tests/test_robustheit.py
+@@ -269,3 +269,38 @@ def test_kleine_bibliotheksaenderung_geht_in_den_vorhandenen_motor(eigener_ordne
+     monkeypatch.setattr(motor.subprocess, "run",
+                         lambda b, **k: sp.CompletedProcess(b, 0, "Would install 2 packages\n + torch==2.9.0\n + x==1\n", ""))
+     assert motor.Installation("0.4.21")._aenderung(motor.quelle("0.4.21"))[0] == "gross"
++
++
++def test_ollama_nimmt_vorhandene_eigene_instanz(monkeypatch):
++    from taleward_worker import ollama
++
++    d = ollama.OllamaDienst()
++    monkeypatch.setattr(ollama, "antwortet", lambda adresse, *a: adresse == d.eigene_adresse)
++    monkeypatch.setattr(ollama, "installiert", lambda: True)
++    monkeypatch.setattr(d, "starten", lambda *a, **k: (_ for _ in ()).throw(AssertionError("kein zweiter Start")))
++    assert d.adresse(True) == d.eigene_adresse
++    # nichts antwortet, Programm fehlt → AUS mit Grund
++    monkeypatch.setattr(ollama, "antwortet", lambda adresse, *a: False)
++    monkeypatch.setattr(ollama, "programm", lambda: None)
++    monkeypatch.setattr(d, "starten", ollama.OllamaDienst.starten.__get__(d))
++    assert d.adresse(True) == ollama.AUS and d.fehler == "programm_fehlt"
++
++
++def test_recaps_nur_mit_genug_hardware():
++    from taleward_worker import hardware
++
++    assert hardware.recaps_moeglich(8192, 16)
++    assert hardware.recaps_moeglich(None, 32)
++    assert not hardware.recaps_moeglich(4096, 8)
++    assert not hardware.recaps_moeglich(None, 8)
++    assert hardware.recaps_moeglich(None, None)  # unbekannt: nicht sperren
++
++
++def test_platzpruefung_vor_der_installation(monkeypatch):
++    from taleward_worker import motor
++
++    monkeypatch.setattr(motor.shutil, "disk_usage", lambda p: type("U", (), {"free": 5 * 1024 ** 3})())
++    assert motor.platz_fehlt_gb(False, "cuda") > 10
++    assert motor.platz_fehlt_gb(True, "cuda") == 0
++    monkeypatch.setattr(motor.shutil, "disk_usage", lambda p: type("U", (), {"free": 40 * 1024 ** 3})())
++    assert motor.platz_fehlt_gb(False, "cuda") == 0
+-- 
+2.43.0
+

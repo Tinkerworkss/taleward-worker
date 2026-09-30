@@ -1,0 +1,545 @@
+From 74329eb34532f0f28076d0e8bfe05cebc3d81aff Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 06:50:49 +0200
+Subject: [PATCH 16/18] =?UTF-8?q?Zertifikate=20aus=20dem=20Windows-Speiche?=
+ =?UTF-8?q?r,=20WebView2-Pr=C3=BCfung,=20kleine=20Bibliotheks=C3=A4nderung?=
+ =?UTF-8?q?en=20ohne=208-GB-Download?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- truststore: die App (und über UV_NATIVE_TLS auch uv) vertraut den Zertifikaten des Systems. Virenscanner mit
+  HTTPS-Prüfung und Firmen-Proxys machten Server, GitHub und PyPI bisher „unerreichbar“. Ein abgelehntes Zertifikat
+  bekommt einen eigenen Fehlertext („zertifikat“) statt „Adresse prüfen“.
+- Fehlt WebView2, erscheint ein Hinweis mit Download-Link statt eines leeren Fensters.
+- Fenster passt auf 1366×768 bei 125 % (Knöpfe unten sonst unter der Taskleiste).
+- Beenden bricht laufende Installationen ab (uv schrieb sonst nach dem Ende weiter in motor-neu).
+- Kommen nur kleine Pakete zum KI-Paket dazu (z. B. truststore), werden sie eingespielt statt 8 GB neu zu laden;
+  nur bei torch/CUDA-Änderungen gibt es die vollständige Installation.
+- Ausrichtungsmodell (TORCH_HOME) liegt im Datenordner statt in %USERPROFILE%\.cache.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013CssQZuRBCpCJdqrK2dJvj
+---
+ pyproject.toml                 |  1 +
+ taleward_worker/__main__.py    | 12 +++++
+ taleward_worker/dienst.py      |  1 +
+ taleward_worker/motor.py       | 87 +++++++++++++++++++++++++++-------
+ taleward_worker/oberflaeche.py | 64 ++++++++++++++++++++++++-
+ taleward_worker/server.py      | 41 ++++++++++++----
+ taleward_worker/ui/texte.js    |  2 +
+ tests/test_robustheit.py       | 70 +++++++++++++++++++++++++++
+ uv.lock                        | 11 +++++
+ 9 files changed, 261 insertions(+), 28 deletions(-)
+
+diff --git a/pyproject.toml b/pyproject.toml
+index a5e9ddb..2e6fa31 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -10,6 +10,7 @@ dependencies = [
+     "pillow>=10",
+     "httpx>=0.27",
+     "platformdirs>=4",
++    "truststore>=0.10",  # Zertifikate aus dem Windows-/macOS-Speicher (Virenscanner, Firmen-Proxy)
+     "zstandard>=0.22; sys_platform != 'win32'",  # Ollama für Linux kommt als .tar.zst
+ ]
+ 
+diff --git a/taleward_worker/__main__.py b/taleward_worker/__main__.py
+index cb208a8..92a2e5f 100644
+--- a/taleward_worker/__main__.py
++++ b/taleward_worker/__main__.py
+@@ -18,6 +18,7 @@ def main() -> int:
+         print("Taleward Worker ok:", ui.exists(), hardware.bericht()["system"])
+         return 0 if ui.exists() else 1
+     _fehler_sichtbar_machen()
++    _systemzertifikate()
+     try:
+         from taleward_worker.oberflaeche import WorkerApp
+ 
+@@ -49,6 +50,17 @@ def _fehler_sichtbar_machen() -> None:
+     threading.excepthook = thread_fehler
+ 
+ 
++def _systemzertifikate() -> None:
++    """Zertifikate aus dem Speicher des Betriebssystems – Virenscanner mit HTTPS-Prüfung (Kaspersky, ESET, Avast …)
++    und Firmen-Proxys schieben eigene Stammzertifikate dazwischen, die das mitgelieferte certifi-Bündel nicht kennt."""
++    try:
++        import truststore
++
++        truststore.inject_into_ssl()
++    except Exception as e:  # noqa: BLE001 – dann eben nur certifi
++        logging.getLogger("taleward_worker").warning("Systemzertifikate nicht nutzbar: %s", e)
++
++
+ def absturz_melden(text: str) -> None:
+     """Rückverfolgung in protokolle/absturz.log schreiben und – unter Windows – ein Hinweisfenster zeigen."""
+     pfad = None
+diff --git a/taleward_worker/dienst.py b/taleward_worker/dienst.py
+index 96f35d6..b1a5e9b 100644
+--- a/taleward_worker/dienst.py
++++ b/taleward_worker/dienst.py
+@@ -213,6 +213,7 @@ class Dienst:
+             "CPU_THREADS": str(max(1, (os.cpu_count() or 2) - 1)) if wahl["geraet"] == "cpu" else "0",
+             "WORKER_SERVER_URL": self.e.server, "WORKER_TOKEN": self.e.token,
+             "WORKER_WORK_DIR": str(pfade.arbeit()), "HF_HOME": str(pfade.modelle()),
++            "TORCH_HOME": str(pfade.modelle() / "torch"),  # Ausrichtungsmodell (~360 MB) nicht in %USERPROFILE%\.cache
+             "DATA_DIR": str(pfade.basis() / "motor-daten"),
+             "WHISPER_MODEL": wahl["modell"], "WHISPER_BATCH": str(wahl["batch"]),
+             "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
+diff --git a/taleward_worker/motor.py b/taleward_worker/motor.py
+index 5c65553..693e156 100644
+--- a/taleward_worker/motor.py
++++ b/taleward_worker/motor.py
+@@ -61,6 +61,12 @@ def uv_programm() -> str:
+     raise MotorFehler("uv_fehlt")
+ 
+ 
++def _netzcode(e: httpx.HTTPError) -> str:
++    from taleward_worker.server import zertifikatsfehler
++
++    return "zertifikat" if zertifikatsfehler(e) else "github_nicht_erreichbar"
++
++
+ def quelle(fassung: str) -> dict:
+     """Download-Adressen für eine Serverfassung. Gibt es kein passendes Git-Tag (v0.4.0), gilt der main-Zweig."""
+     eigen = os.environ.get("TALEWARD_MOTOR_QUELLE")  # Entwicklung: lokaler Ordner des Server-Codes
+@@ -72,8 +78,8 @@ def quelle(fassung: str) -> dict:
+         for ref in kandidaten:
+             try:
+                 r = k.head(f"https://raw.githubusercontent.com/{REPO}/{ref}/engine-requirements.txt")
+-            except httpx.HTTPError:
+-                raise MotorFehler("github_nicht_erreichbar") from None
++            except httpx.HTTPError as e:
++                raise MotorFehler(_netzcode(e)) from None
+             if r.status_code == 200:
+                 return _adressen(ref, genau=True)
+     return _adressen("main", genau=False)
+@@ -133,7 +139,8 @@ class Installation:
+ 
+     def _umgebung(self) -> dict:
+         env = saubere_umgebung()
+-        env.update({"UV_NO_CONFIG": "1", "UV_CACHE_DIR": str(pfade.basis() / "cache"),
++        env.update({"UV_NO_CONFIG": "1", "UV_NATIVE_TLS": "1",  # Zertifikate aus dem Windows-Speicher (Virenscanner)
++                    "UV_CACHE_DIR": str(pfade.basis() / "cache"),
+                     "UV_PYTHON_INSTALL_DIR": str(pfade.basis() / "python"),
+                     "UV_PYTHON_PREFERENCE": "only-managed",
+                     "UV_NO_PROGRESS": "1", "NO_COLOR": "1", "UV_LINK_MODE": "hardlink"})  # kein zweites Exemplar: spart während der Installation ~8 GB
+@@ -181,8 +188,12 @@ class Installation:
+     def _installieren(self) -> None:
+         q = quelle(self.fassung)
+         self.zeilen.append(f"Fassung {self.fassung} → {q['ref']}" + ("" if q["genau"] else " (kein Tag, main)"))
+-        if not self.testmodus and self._nur_taleward_noetig(q):
+-            return self._nur_taleward(q)
++        if not self.testmodus:
++            art, pakete = self._aenderung(q)
++            if art == "gleich":
++                return self._nur_taleward(q)
++            if art == "klein":  # nur kleine Bibliotheken neu – in den vorhandenen Motor, statt 8 GB neu zu laden
++                return self._nur_taleward(q, zusatz=pakete)
+         system = "test" if self.testmodus else "cpu" if self.backend == "cpu" else (
+             "windows" if sys.platform == "win32" else "linux")
+         self.erwartet_mb = ERWARTET_MB[system]
+@@ -255,11 +266,15 @@ class Installation:
+ 
+     # ------------------------------------------------------------------ Schneller Weg bei neuer Serverfassung
+     def _nur_taleward_noetig(self, q: dict) -> bool:
+-        """Sind die KI-Bibliotheken der neuen Fassung dieselben wie im installierten Motor? Dann reicht es, nur den
+-        Taleward-Code zu tauschen (Sekunden statt 8 GB). Geprüft mit einem Probelauf von uv gegen den Motor."""
++        return self._aenderung(q)[0] == "gleich"
++
++    def _aenderung(self, q: dict) -> tuple[str, list[str]]:
++        """Was hat sich an den KI-Bibliotheken gegenüber dem installierten Motor geändert? Probelauf von uv:
++        „gleich“ (nur Taleward-Code tauschen, Sekunden), „klein“ (ein paar kleine Pakete – in den vorhandenen Motor)
++        oder „gross“ (torch/CUDA anders – vollständige Installation, 8 GB)."""
+         inst = installiert()
+         if not inst or inst.get("testmodus") or inst.get("backend", "cuda") != self.backend:
+-            return False
++            return "gross", []
+         try:
+             basis, extra = anforderungen_aufteilen(anforderungen_lesen(q["anforderungen"]))
+             ordner = pfade.basis() / "cache"
+@@ -271,21 +286,36 @@ class Installation:
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                                  env=self._umgebung(), cwd=pfade.basis(), **_ohne_fenster())
+         except (MotorFehler, OSError, subprocess.SubprocessError):
+-            return False
++            return "gross", []
+         ausgabe = res.stdout + res.stderr
+-        gleich = res.returncode == 0 and "Would make no changes" in ausgabe
+-        self.zeilen.append("KI-Bibliotheken unverändert – nur der Taleward-Code wird getauscht." if gleich
+-                           else "KI-Bibliotheken haben sich geändert – vollständige Installation.")
+-        return gleich
+-
+-    def _nur_taleward(self, q: dict) -> None:
++        if res.returncode != 0:
++            self.zeilen.append("Probelauf gescheitert – vollständige Installation.")
++            return "gross", []
++        if "Would make no changes" in ausgabe:
++            self.zeilen.append("KI-Bibliotheken unverändert – nur der Taleward-Code wird getauscht.")
++            return "gleich", []
++        pakete = geaenderte_pakete(ausgabe)
++        if pakete and not any(schwer(p) for p in pakete):
++            self.zeilen.append("Kleine Änderung an den KI-Bibliotheken (" + ", ".join(pakete) +
++                               ") – wird in das vorhandene KI-Paket eingespielt.")
++            return "klein", pakete
++        self.zeilen.append("KI-Bibliotheken haben sich geändert – vollständige Installation.")
++        return "gross", pakete
++
++    def _nur_taleward(self, q: dict, zusatz: list[str] | None = None) -> None:
+         self.phase = "taleward"
+         py = str(pfade.motor_python())
+         if callable(self.vor_tausch):
+             self.vor_tausch()  # laufenden Worker anhalten (nur für wenige Sekunden)
+         try:
++            if zusatz:
++                self.phase = "pakete"
++                torch = "cpu" if self.backend == "cpu" else TORCH_BACKEND
++                self._uv("pip", "install", "--python", py, "--no-deps", "--torch-backend", torch,
++                         "-r", str(pfade.basis() / "cache" / "pruefen.txt"), anteil_von=0.1, anteil_bis=0.6)
++                self.phase = "taleward"
+             self._uv("pip", "install", "--python", py, "--no-deps", "--reinstall", q["paket"],
+-                     anteil_von=0.1, anteil_bis=0.9)
++                     anteil_von=0.6 if zusatz else 0.1, anteil_bis=0.9)
+             pruefung = _python_pruefen(py, "import app, sys; print('ok')")
+             if "ok" not in pruefung.stdout:
+                 raise MotorFehler("installation", pruefung.stderr[-2000:])
+@@ -413,8 +443,8 @@ def anforderungen_lesen(quelle: str) -> str:
+     if quelle.startswith(("http://", "https://")):
+         try:
+             r = httpx.get(quelle, timeout=30, follow_redirects=True, headers={"User-Agent": f"TalewardWorker/{VERSION}"})
+-        except httpx.HTTPError:
+-            raise MotorFehler("github_nicht_erreichbar") from None
++        except httpx.HTTPError as e:
++            raise MotorFehler(_netzcode(e)) from None
+         if r.status_code != 200:
+             raise MotorFehler("installation", f"engine-requirements.txt: HTTP {r.status_code}")
+         return r.text
+@@ -481,6 +511,27 @@ def torch_pruefen(py: str) -> dict:
+         return {"fehler": (r.stderr or r.stdout)[-1000:].strip() or "PyTorch antwortet nicht."}
+ 
+ 
++SCHWERE_PAKETE = ("torch", "torchaudio", "torchvision", "nvidia-", "triton", "ctranslate2", "onnxruntime",
++                  "cudnn", "cublas", "cuda-")
++
++
++def schwer(paket: str) -> bool:
++    name = paket.lower().split("==")[0].strip()
++    return any(name.startswith(s) or name == s.rstrip("-") for s in SCHWERE_PAKETE)
++
++
++def geaenderte_pakete(ausgabe: str) -> list[str]:
++    """Aus dem uv-Probelauf („ + paket==1.0“, „ - paket==0.9“) die betroffenen Paketnamen."""
++    namen: list[str] = []
++    for zeile in ausgabe.splitlines():
++        z = zeile.strip()
++        if z[:2] in ("+ ", "- ") and len(z) > 2:
++            name = z[2:].split("==")[0].split(" ")[0].strip()
++            if name and name not in namen:
++                namen.append(name)
++    return namen
++
++
+ def fehlercode(ausgabe: str) -> str:
+     """Aus der letzten uv-Ausgabe einen Fehlercode für die Oberfläche machen (Texte in ui/texte.js, f_…)."""
+     klein = ausgabe.lower()
+diff --git a/taleward_worker/oberflaeche.py b/taleward_worker/oberflaeche.py
+index 9074be1..ea822b2 100644
+--- a/taleward_worker/oberflaeche.py
++++ b/taleward_worker/oberflaeche.py
+@@ -387,6 +387,9 @@ class WorkerApp:
+ 
+     def beenden(self) -> None:
+         self._beendet.set()
++        for inst in (self.installation, self.ollama_installation):
++            if inst is not None:
++                inst.abbrechen()  # sonst schreibt uv nach dem Ende der App minutenlang weiter in motor-neu
+         self.dienst.stoppen()
+         self.dienst.ollama.stoppen()
+         if self.tray is not None:
+@@ -472,12 +475,16 @@ class WorkerApp:
+         if einzeln.andere_wecken():
+             return
+         einzeln.lauschen(self.zeigen)
++        if not webview2_vorhanden():
++            webview2_fehlt_melden()
++            return
+         self.hardware = hardware.bericht()
+         self._tray_starten()
+         versteckt = self.hintergrund and self.e.gekoppelt
++        breite, hoehe, mindestens = fenstergroesse(bildschirm_hoehe())
+         self.fenster = webview.create_window(
+             "Taleward Worker", str(pfade.ressourcen() / "ui" / "index.html"), js_api=Api(self),
+-            width=560, height=760, min_size=(460, 600), background_color="#F2E8D5",
++            width=breite, height=hoehe, min_size=mindestens, background_color="#F2E8D5",
+             hidden=versteckt and self.tray is not None, minimized=versteckt and self.tray is None)
+         self.fenster.events.closing += self._beim_schliessen
+         threading.Thread(target=self._hintergrund_pflege, daemon=True, name="pflege").start()
+@@ -510,3 +517,58 @@ def tray_titel(d: dict, sprache: str) -> str:
+     }
+     de_text, en_text = texte.get(art, ("Taleward Worker", "Taleward Worker"))
+     return "Taleward Worker – " + (en_text if en else de_text)
++
++
++# ---------------------------------------------------------------------- Fenster und Browser-Kern
++FENSTER = (560, 760)
++FENSTER_MINDESTENS = (460, 600)
++WEBVIEW2_LINK = "https://developer.microsoft.com/microsoft-edge/webview2/"
++
++
++def bildschirm_hoehe() -> int | None:
++    try:
++        import webview
++
++        return int(webview.screens[0].height) if webview.screens else None
++    except Exception:  # noqa: BLE001 – dann die Vorgabe
++        return None
++
++
++def fenstergroesse(bildschirm: int | None) -> tuple[int, int, tuple[int, int]]:
++    """Fenstergröße so, dass es auch auf 1366×768 bei 125 % Skalierung (≈ 614 logische Pixel) ganz sichtbar ist –
++    die Knöpfe „Weiter“ und „Installieren“ sitzen unten."""
++    breite, hoehe = FENSTER
++    if not bildschirm:
++        return breite, hoehe, FENSTER_MINDESTENS
++    nutzbar = max(400, bildschirm - 80)  # Taskleiste und Fensterrahmen
++    return breite, min(hoehe, nutzbar), (FENSTER_MINDESTENS[0], min(FENSTER_MINDESTENS[1], nutzbar))
++
++
++def webview2_vorhanden() -> bool:
++    """Windows: pywebview fiele ohne WebView2 still auf den alten Internet-Explorer-Kern zurück, der unsere
++    Oberfläche nicht ausführen kann – das Fenster bliebe leer, ohne jede Meldung."""
++    if sys.platform != "win32":
++        return True
++    try:
++        from webview.platforms import winforms
++
++        return bool(getattr(winforms, "is_chromium", True))
++    except Exception:  # noqa: BLE001 – lieber starten als fälschlich blockieren
++        return True
++
++
++def webview2_fehlt_melden() -> None:
++    log.error("WebView2 fehlt – Oberfläche kann nicht starten")
++    if sys.platform != "win32":
++        return
++    try:
++        import ctypes
++
++        antwort = ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
++            None, "Taleward Worker braucht die Microsoft-Komponente „WebView2“, die auf diesem PC fehlt.\n\n"
++            "Jetzt die Download-Seite öffnen? (Installieren, dann Taleward Worker erneut starten.)",
++            "Taleward Worker", 0x14)  # MB_YESNO | MB_ICONERROR
++        if antwort == 6:  # IDYES
++            webbrowser.open(WEBVIEW2_LINK)
++    except Exception:  # noqa: BLE001
++        pass
+diff --git a/taleward_worker/server.py b/taleward_worker/server.py
+index 370b798..aac21fb 100644
+--- a/taleward_worker/server.py
++++ b/taleward_worker/server.py
+@@ -39,6 +39,31 @@ def unverschluesselt(adresse: str) -> bool:
+     return t.scheme == "http" and t.hostname not in ("localhost", "127.0.0.1", "::1")
+ 
+ 
++def zertifikatsfehler(e: BaseException) -> bool:
++    """Steckt hinter dem Verbindungsfehler ein abgelehntes Zertifikat? Typisch: Virenscanner mit HTTPS-Prüfung
++    oder Firmen-Proxy schieben ein eigenes Stammzertifikat dazwischen; der Browser kennt es, wir sonst nicht."""
++    import ssl
++
++    ursache: BaseException | None = e
++    for _ in range(5):
++        if ursache is None:
++            break
++        if isinstance(ursache, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(ursache):
++            return True
++        ursache = ursache.__cause__ or ursache.__context__
++    return False
++
++
++def _verbindungsfehler(e: httpx.HTTPError) -> ServerFehler:
++    if zertifikatsfehler(e):
++        return ServerFehler("zertifikat")
++    if isinstance(e, httpx.TimeoutException):
++        return ServerFehler("zeitueberschreitung")
++    if isinstance(e, httpx.ConnectError):
++        return ServerFehler("nicht_erreichbar")
++    return ServerFehler("kein_taleward")
++
++
+ def pruefen(adresse: str) -> dict:
+     """Ist dort ein Taleward-Server? Liefert Name und API-Fassung."""
+     try:
+@@ -50,11 +75,9 @@ def pruefen(adresse: str) -> dict:
+                 raise ServerFehler("kein_taleward")
+             info = k.get(f"{adresse}/api/v1/info")
+             daten = info.json() if info.status_code == 200 else {}
+-    except httpx.ConnectError:
+-        raise ServerFehler("nicht_erreichbar") from None
+-    except httpx.TimeoutException:
+-        raise ServerFehler("zeitueberschreitung") from None
+-    except (httpx.HTTPError, ValueError):
++    except httpx.HTTPError as e:
++        raise _verbindungsfehler(e) from None
++    except ValueError:
+         raise ServerFehler("kein_taleward") from None
+     return {"name": daten.get("serverName") or daten.get("name") or "", "apiVersion": daten.get("apiVersion", "")}
+ 
+@@ -66,8 +89,8 @@ def koppeln(adresse: str, code: str, name: str) -> dict:
+     try:
+         with _klient() as k:
+             r = k.post(f"{adresse}/worker/v1/pair", json={"code": code, "name": name.strip()[:60] or "worker"})
+-    except httpx.HTTPError:
+-        raise ServerFehler("nicht_erreichbar") from None
++    except httpx.HTTPError as e:
++        raise _verbindungsfehler(e) from None
+     if r.status_code != 201:
+         try:
+             d = r.json()
+@@ -94,8 +117,8 @@ def konfiguration(adresse: str, token: str) -> dict:
+     try:
+         with _klient() as k:
+             r = k.get(f"{adresse}/worker/v1/config", headers={"Authorization": f"Bearer {token}"})
+-    except httpx.HTTPError:
+-        raise ServerFehler("nicht_erreichbar") from None
++    except httpx.HTTPError as e:
++        raise _verbindungsfehler(e) from None
+     if r.status_code == 401:
+         raise ServerFehler("abgelehnt")
+     if r.status_code != 200:
+diff --git a/taleward_worker/ui/texte.js b/taleward_worker/ui/texte.js
+index 9262a05..5ead7bf 100644
+--- a/taleward_worker/ui/texte.js
++++ b/taleward_worker/ui/texte.js
+@@ -85,6 +85,7 @@ window.TEXTE = {
+     f_adresse_leer: "Bitte die Adresse des Servers eintragen.",
+     f_adresse_ungueltig: "Diese Adresse ist ungültig.",
+     f_nicht_erreichbar: "Der Server ist nicht erreichbar. Adresse prüfen – steht sie so auch in der App?",
++    f_zertifikat: "Die verschlüsselte Verbindung wird abgelehnt: Das Zertifikat ist hier nicht vertrauenswürdig. Meist steckt ein Virenscanner mit HTTPS-Prüfung oder ein Firmen-Proxy dahinter – dort Taleward ausnehmen oder dessen Zertifikat in Windows eintragen.",
+     f_zeitueberschreitung: "Der Server antwortet nicht. Später erneut versuchen.",
+     f_kein_taleward: "Unter dieser Adresse läuft kein Taleward-Server.",
+     f_https_umleitung: "Der Server leitet auf https:// um – bitte die Adresse mit https:// eintragen.",
+@@ -203,6 +204,7 @@ window.TEXTE = {
+     ph_taleward: "Installing Taleward worker", ph_ffmpeg: "Final check", ph_tauschen: "Replacing the old AI package", ph_fertig: "Done", mb_von: "{a} of about {b}",
+     f_adresse_leer: "Please enter the server address.", f_adresse_ungueltig: "This address is invalid.",
+     f_nicht_erreichbar: "The server can't be reached. Check the address – is it the same as in the app?",
++    f_zertifikat: "The encrypted connection was refused: the certificate is not trusted here. Usually an antivirus with HTTPS scanning or a company proxy is in between – exclude Taleward there or add its certificate to Windows.",
+     f_zeitueberschreitung: "The server doesn't respond. Try again later.", f_kein_taleward: "There is no Taleward server at this address.",
+     f_https_umleitung: "The server redirects to https:// – please enter the address with https://.",
+     f_unverschluesselt: "The address is unencrypted (http://). Only allow this on your home network – tick the box below.",
+diff --git a/tests/test_robustheit.py b/tests/test_robustheit.py
+index d712d52..d4e7b91 100644
+--- a/tests/test_robustheit.py
++++ b/tests/test_robustheit.py
+@@ -199,3 +199,73 @@ def test_gescheiterter_tausch_wird_nicht_als_neue_fassung_gezaehlt(eigener_ordne
+     inst._lauf()
+     assert phasen == ["fehler"] and inst.fehler == "dateien_in_benutzung"
+     assert json.loads((pfade.motor() / "taleward-motor.json").read_text())["fassung"] == "alt"
++
++
++def test_zertifikatsfehler_wird_erkannt(monkeypatch):
++    import ssl
++
++    innen = ssl.SSLCertVerificationError("certificate verify failed: unable to get local issuer certificate")
++    aussen = httpx.ConnectError("x")
++    aussen.__cause__ = innen
++    assert server.zertifikatsfehler(aussen)
++    assert not server.zertifikatsfehler(httpx.ConnectError("Connection refused"))
++
++    def antwort(req: httpx.Request):
++        raise aussen
++
++    monkeypatch.setattr(server, "_klient", lambda: httpx.Client(transport=httpx.MockTransport(antwort)))
++    with pytest.raises(server.ServerFehler) as e:
++        server.pruefen("https://x")
++    assert e.value.code == "zertifikat"
++    with pytest.raises(server.ServerFehler) as e:
++        server.konfiguration("https://x", "t")
++    assert e.value.code == "zertifikat"
++
++
++def test_fenster_passt_auf_kleine_bildschirme():
++    from taleward_worker.oberflaeche import fenstergroesse, webview2_vorhanden
++
++    assert fenstergroesse(None) == (560, 760, (460, 600))
++    assert fenstergroesse(1080) == (560, 760, (460, 600))
++    b, h, mind = fenstergroesse(614)  # 1366×768 bei 125 %
++    assert h == 534 and mind == (460, 534)
++    assert fenstergroesse(512)[1] == 432  # 150 %
++    assert webview2_vorhanden() or sys.platform == "win32"
++
++
++def test_kleine_bibliotheksaenderung_geht_in_den_vorhandenen_motor(eigener_ordner, monkeypatch):
++    """Kommt nur ein kleines Paket dazu (truststore), wird es eingespielt – kein neues 8-GB-Paket."""
++    import json
++    import subprocess as sp
++
++    from taleward_worker import motor, pfade
++
++    assert motor.geaenderte_pakete(" + truststore==0.10.4\n - alt==1\nWould install 1 package") == ["truststore", "alt"]
++    assert motor.schwer("torch==2.8.0") and motor.schwer("nvidia-cudnn-cu12") and not motor.schwer("truststore")
++
++    py = pfade.motor_python()
++    py.parent.mkdir(parents=True, exist_ok=True)
++    py.write_text("")
++    (pfade.motor() / "taleward-motor.json").write_text(json.dumps({"fassung": "0.4.19", "backend": "cuda"}))
++    monkeypatch.setattr(motor, "quelle", lambda f: {"ref": f"v{f}", "genau": True, "paket": "paket.zip",
++                                                    "anforderungen": "egal"})
++    monkeypatch.setattr(motor, "anforderungen_lesen", lambda q: "torch==2.8.0\ntruststore==0.10.4\n")
++    monkeypatch.setattr(motor, "uv_programm", lambda: "uv")
++
++    def run(befehl, **kw):
++        if "--dry-run" in befehl:
++            return sp.CompletedProcess(befehl, 0, "Would install 1 package\n + truststore==0.10.4\n", "")
++        return sp.CompletedProcess(befehl, 0, "ok\n", "")
++
++    monkeypatch.setattr(motor.subprocess, "run", run)
++    uv = []
++    monkeypatch.setattr(motor.Installation, "_uv", lambda self, *a, **k: uv.append(a))
++    inst = motor.Installation("0.4.20")
++    inst._lauf()
++    assert inst.phase == "fertig" and motor.installiert()["fassung"] == "0.4.20"
++    assert len(uv) == 2 and "-r" in uv[0] and "--torch-backend" in uv[0] and "--reinstall" in uv[1]
++
++    # torch dabei → vollständige Installation
++    monkeypatch.setattr(motor.subprocess, "run",
++                        lambda b, **k: sp.CompletedProcess(b, 0, "Would install 2 packages\n + torch==2.9.0\n + x==1\n", ""))
++    assert motor.Installation("0.4.21")._aenderung(motor.quelle("0.4.21"))[0] == "gross"
+diff --git a/uv.lock b/uv.lock
+index 24674ad..071a285 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -600,6 +600,7 @@ dependencies = [
+     { name = "platformdirs" },
+     { name = "pystray" },
+     { name = "pywebview" },
++    { name = "truststore" },
+     { name = "zstandard", marker = "sys_platform != 'win32'" },
+ ]
+ 
+@@ -622,6 +623,7 @@ requires-dist = [
+     { name = "pystray", specifier = ">=0.19" },
+     { name = "pywebview", specifier = ">=5.3" },
+     { name = "pywebview", extras = ["qt"], marker = "extra == 'qt'", specifier = ">=5.3" },
++    { name = "truststore", specifier = ">=0.10" },
+     { name = "zstandard", marker = "sys_platform != 'win32'", specifier = ">=0.22" },
+ ]
+ provides-extras = ["qt"]
+@@ -632,6 +634,15 @@ dev = [
+     { name = "pytest", specifier = ">=8" },
+ ]
+ 
++[[package]]
++name = "truststore"
++version = "0.10.4"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
++]
++
+ [[package]]
+ name = "typing-extensions"
+ version = "4.16.0"
+-- 
+2.43.0
+
