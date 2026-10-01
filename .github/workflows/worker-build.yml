@@ -82,3 +82,36 @@ jobs:
         run: |
           gh release upload "${{ github.event.release.tag_name }}" dist/TalewardWorker-Setup.exe \
             "dist/TalewardWorker-Setup-$VERSION.exe" install-linux.sh --clobber
+veroeffentlichen:
+    # Neue Fassung in pyproject.toml → Tag worker-v<Fassung> und Vorabfassung mit Installer.
+    # Die Server bieten Vorabfassungen nicht an; zum Verteilen auf GitHub den Haken „pre-release“ entfernen.
+    needs: windows
+    if: github.event_name != 'release' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Neue Fassung?
+        run: |
+          V=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          if git rev-parse "worker-v$V" >/dev/null 2>&1; then
+            echo "worker-v$V gibt es schon."
+          else
+            echo "NEU=1" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/download-artifact@v4
+        if: env.NEU == '1'
+        with:
+          name: TalewardWorker-Setup
+          path: dist
+      - name: Vorabfassung anlegen
+        if: env.NEU == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "worker-v$VERSION" --target "$(git rev-parse HEAD)" --prerelease \
+            --title "Taleward Worker $VERSION" \
+            --notes "Automatisch gebaut. Zum Verteilen den Haken pre-release entfernen." \
+            dist/TalewardWorker-Setup.exe "dist/TalewardWorker-Setup-$VERSION.exe" install-linux.sh
