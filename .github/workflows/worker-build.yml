@@ -82,7 +82,8 @@ jobs:
         run: |
           gh release upload "${{ github.event.release.tag_name }}" dist/TalewardWorker-Setup.exe \
             "dist/TalewardWorker-Setup-$VERSION.exe" install-linux.sh --clobber
-veroeffentlichen:
+
+  veroeffentlichen:
     # Neue Fassung in pyproject.toml → Tag worker-v<Fassung> und Vorabfassung mit Installer.
     # Die Server bieten Vorabfassungen nicht an; zum Verteilen auf GitHub den Haken „pre-release“ entfernen.
     needs: windows
