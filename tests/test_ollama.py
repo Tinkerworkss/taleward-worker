@@ -19,7 +19,7 @@ assert sys.argv[1:] == ["serve"] and os.environ["OLLAMA_MODELS"] and os.environ[
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-        self.wfile.write(json.dumps({{"version": "0.34.4"}}).encode())
+        self.wfile.write(json.dumps({{"version": "0.35.0"}}).encode())
     def log_message(self, *a): pass
 http.server.HTTPServer((host, int(port)), H).serve_forever()
 '''

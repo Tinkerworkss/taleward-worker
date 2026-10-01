@@ -19,7 +19,7 @@ herunterladen und starten. Administratorrechte sind nicht nötig.
 - Windows 10 (ab 1809) oder 11
 - am besten eine NVIDIA-Grafikkarte (ab 2 GB, gut ab 6 GB) mit aktuellem Treiber (ab 528); sonst arbeitet der Prozessor
 - mindestens 8 GB Arbeitsspeicher
-- etwa 16 GB freier Speicher (KI-Paket etwa 8 GB, Sprachmodelle etwa 5 GB)
+- etwa 16 GB freier Speicher (KI-Paket etwa 8 GB, Sprachmodell einige GB)
 
 Die App liegt unter `%LOCALAPPDATA%\Programs\Taleward Worker`; KI-Paket, Modelle, Einstellungen und Protokoll unter
 `%LOCALAPPDATA%\Taleward Worker`. Beim Deinstallieren fragt der Installer, ob diese Daten auch weg sollen.
@@ -67,8 +67,8 @@ nur minimiert.
   Windows installiert sie sie still, sobald sie nichts zu tun hat; unter Linux über `uv tool install`. Abschaltbar in
   den Einstellungen.
 - **Recaps auch hier schreiben** (freiwillig): Die App richtet Ollama in fester, geprüfter Fassung in ihrem
-  Datenordner ein (etwa 1,4 GB, ohne Administratorrechte) und lädt beim ersten Recap ein Sprachmodell (etwa 5 GB). Ein
-  schon installiertes Ollama hat Vorrang. Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.
+  Datenordner ein (etwa 1,4 GB, ohne Administratorrechte) und lädt beim ersten Recap ein Sprachmodell passend zur
+  Grafikkarte (einige GB). Ein schon installiertes Ollama hat Vorrang, es muss mindestens Fassung 0.35.0 sein. Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.
 - **Im Hintergrund:** Autostart, Symbol im Infobereich, Pausieren. Während eines Auftrags geht der PC nicht in den
   Ruhezustand.
 - **Datenschutz:** Aufnahmen werden nur im Arbeitsordner verarbeitet und danach gelöscht. Zurück an den Server gehen

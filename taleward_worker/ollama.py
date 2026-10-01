@@ -3,8 +3,8 @@
 - Läuft schon ein eigenes Ollama (Standardadresse 127.0.0.1:11434), nutzt der Worker dieses.
 - Sonst lädt die App Ollama in fester, geprüfter Fassung in ihren Datenordner (kein Administrator nötig) und startet
   es selbst als Unterprozess auf einem eigenen Anschluss, damit es sich mit keinem anderen Ollama in die Quere kommt.
-- Das Sprachmodell lädt der Worker beim ersten Recap über Ollama (etwa 5 GB); danach wird es jeweils wieder
-  entladen, damit die Grafikkarte für die Transkription frei ist.
+- Das Sprachmodell (nach Grafikkarte, einige GB) lädt der Worker beim ersten Recap über Ollama; danach wird es
+  jeweils wieder entladen, damit die Grafikkarte für die Transkription frei ist.
 """
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ import httpx
 
 from taleward_worker import pfade, prozesse
 
-FASSUNG = "0.34.4"
+FASSUNG = "0.35.0"  # gemma4-Modelle brauchen mindestens 0.35.0
 QUELLE = f"https://github.com/ollama/ollama/releases/download/v{FASSUNG}"
 DATEIEN = {  # Datei und SHA-256 (aus dem Release, von GitHub geprüft)
-    "windows": ("ollama-windows-amd64.zip", "535193f38f3344e5b08f5d1c171c31ce11aa17f0124ff69ae26d8ec7fe06fa62"),
-    "linux": ("ollama-linux-amd64.tar.zst", "c238986e61d40c0cc5f4a9b9e40b9eea104350b77efa34741fc134e105cb9533"),
+    "windows": ("ollama-windows-amd64.zip", "d6f7d3dd4f5d013553a78c1e78b2521fcf41d43dd2863e4596cdc046fe6036db"),
+    "linux": ("ollama-linux-amd64.tar.zst", "1c114a6b220c5efca2ef2b1e5f01d1e535e26f6cd6d1678c8489325d2835e525"),
 }
 GROESSE_MB = {"windows": 1394, "linux": 1362}
 EIGENER_PORT = 11435
