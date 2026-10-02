@@ -1,6 +1,7 @@
 name: Bauen
-# Prüft die App bei jeder Änderung. Wird ein Release mit Tag „worker-v…“ veröffentlicht,
-# baut dieser Ablauf den Windows-Installer und hängt ihn samt Linux-Skript an das Release.
+# Prüft die App bei jeder Änderung. Neue Fassung in pyproject.toml → Tag worker-v<Fassung> und Vorabfassung mit
+# Installer. Veröffentlicht wird sie erst durch den Ablauf „Freigabe“ (nach Bestätigung durch Benjamin).
+# Wird ein Release „worker-v…“ von Hand veröffentlicht, baut dieser Ablauf den Installer und hängt ihn an.
 on:
   push:
     branches: [main]
@@ -12,18 +13,24 @@ on:
     workflows: ["Patch einspielen"]
     types: [completed]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   pruefen:
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'worker-v')
-    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'worker-v'))
+      && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: Tests der App
-        run: uv sync && uv run pytest -q
+        run: uv sync --frozen && uv run pytest -q
       - name: KI-Paket für Windows (CUDA) und Linux auflösbar?
         run: bash packaging/pruefe-ki-paket.sh
       - name: Linux-Skript
@@ -31,21 +38,30 @@ jobs:
 
   windows:
     needs: pruefen
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'worker-v')
-    runs-on: windows-latest
+    runs-on: windows-2025
+    permissions:
+      contents: read
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: Fassung
+        env:
+          EREIGNIS: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            V="${{ github.event.release.tag_name }}"; V="${V#worker-v}"
+          set -euo pipefail
+          if [ "$EREIGNIS" = "release" ]; then
+            V="${RELEASE_TAG#worker-v}"
           else
             V=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
           fi
+          printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Unbekannte Fassung: $V"; exit 1; }
           echo "VERSION=$V" >> "$GITHUB_ENV"
           sed -i "s/^VERSION = .*/VERSION = \"$V\"/" taleward_worker/__init__.py
       - name: uv beilegen (installiert später das KI-Paket)
@@ -60,7 +76,7 @@ jobs:
           bin/uv.exe --version
       - name: App bauen
         run: |
-          uv sync --python 3.12
+          uv sync --frozen --python 3.12
           uv run pyinstaller packaging/taleward-worker.spec --noconfirm
           dist/TalewardWorker/TalewardWorker.exe --pruefen
       - name: Installer bauen
@@ -71,48 +87,74 @@ jobs:
           if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
           & $iscc "/DVersion=$env:VERSION" packaging\windows\taleward-worker.iss
           Copy-Item dist\TalewardWorker-Setup.exe "dist\TalewardWorker-Setup-$env:VERSION.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: TalewardWorker-Setup
           path: dist/TalewardWorker-Setup*.exe
+
+  anhaengen:
+    # Von Hand veröffentlichtes Release: Installer anhängen (nie vorhandene Dateien ersetzen)
+    needs: windows
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: TalewardWorker-Setup
+          path: dist
       - name: An das Release hängen
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" dist/TalewardWorker-Setup.exe \
-            "dist/TalewardWorker-Setup-$VERSION.exe" install-linux.sh --clobber
+          set -euo pipefail
+          V="${TAG#worker-v}"
+          gh release upload "$TAG" dist/TalewardWorker-Setup.exe "dist/TalewardWorker-Setup-$V.exe" install-linux.sh
 
   veroeffentlichen:
     # Neue Fassung in pyproject.toml → Tag worker-v<Fassung> und Vorabfassung mit Installer.
-    # Die Server bieten Vorabfassungen nicht an; zum Verteilen auf GitHub den Haken „pre-release“ entfernen.
+    # Die Server bieten sie erst an, wenn „Freigabe“ sie unterschrieben und veröffentlicht hat.
     needs: windows
     if: github.event_name != 'release' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || '' }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Neue Fassung?
         run: |
+          set -euo pipefail
           V=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Unbekannte Fassung: $V"; exit 1; }
           echo "VERSION=$V" >> "$GITHUB_ENV"
           if git rev-parse "worker-v$V" >/dev/null 2>&1; then
             echo "worker-v$V gibt es schon."
           else
             echo "NEU=1" >> "$GITHUB_ENV"
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: env.NEU == '1'
         with:
           name: TalewardWorker-Setup
           path: dist
       - name: Vorabfassung anlegen
         if: env.NEU == '1'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           gh release create "worker-v$VERSION" --target "$(git rev-parse HEAD)" --prerelease \
             --title "Taleward Worker $VERSION" \
-            --notes "Automatisch gebaut. Zum Verteilen den Haken pre-release entfernen." \
+            --notes "Automatisch gebaut. Wird mit der Freigabe (Ablauf Freigabe) veröffentlicht." \
             dist/TalewardWorker-Setup.exe "dist/TalewardWorker-Setup-$VERSION.exe" install-linux.sh
