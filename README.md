@@ -61,11 +61,14 @@ nur minimiert.
 
 - **Schieberegler „Grafikspeicher für Taleward“:** legt fest, wie viel Grafikspeicher der Worker höchstens nutzt; der
   Rest bleibt für anderes. Nach jedem Auftrag zeigt die App Dauer und höchsten Grafikspeicher als gemessene Werte.
-- **Immer passend zum Server:** Das KI-Paket wird in genau der Fassung des Servers installiert (Git-Tag `v<Fassung>`
-  im Server-Repository) und zieht nach einem Server-Update selbst nach.
-- **Updates über den eigenen Server:** Die App fragt nur ihren Taleward-Server nach neuen Fassungen, nie GitHub. Unter
+- **Immer passend zum Server:** Das KI-Paket wird in genau der Fassung des Servers installiert (der freigegebene Commit
+  zum Git-Tag `v<Fassung>` im Server-Repository) und zieht nach einem Server-Update selbst nach.
+- **Updates über den eigenen Server:** Die App fragt nur ihren Taleward-Server nach neuen Fassungen. Unter
   Windows installiert sie sie still, sobald sie nichts zu tun hat; unter Linux über `uv tool install`. Abschaltbar in
   den Einstellungen.
+- **Nur freigegebene Fassungen:** App-Updates und KI-Paket werden nur installiert, wenn ihre Freigabe (`freigabe.txt`
+  am Release, mit `ssh-keygen -Y sign` unterschrieben) zum fest eingebauten Schlüssel passt. Der Server reicht die
+  Freigabe nur durch; Repo und Prüfsumme kommen aus ihr, der Installer nur von der Adresse des gekoppelten Servers.
 - **Recaps auch hier schreiben** (freiwillig): Die App richtet Ollama in fester, geprüfter Fassung in ihrem
   Datenordner ein (etwa 1,4 GB, ohne Administratorrechte) und lädt beim ersten Recap ein Sprachmodell passend zur
   Grafikkarte (einige GB). Ein schon installiertes Ollama hat Vorrang, es muss mindestens Fassung 0.35.0 sein. Auf dem Server muss unter „Zusammenfassung“ „Lokales Modell“ gewählt sein.

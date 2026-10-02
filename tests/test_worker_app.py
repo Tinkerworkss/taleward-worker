@@ -67,13 +67,12 @@ def test_motor_umgebung_folgt_profil(monkeypatch):
     assert not hardware.Grafikkarte("x", 8192, "470.10").treiber_ok
 
 
-def test_quelle_lokal_und_main(monkeypatch):
+def test_quelle_lokal_und_commit(monkeypatch):
     monkeypatch.setenv("TALEWARD_MOTOR_QUELLE", "/pfad/server")
     q = motor.quelle("0.4.0")
     assert q["paket"] == "/pfad/server" and q["anforderungen"].endswith("engine-requirements.txt")
     monkeypatch.delenv("TALEWARD_MOTOR_QUELLE")
-    assert motor._adressen("main", False)["paket"].endswith("/refs/heads/main.zip")
-    assert motor._adressen("v0.4.0", True)["paket"].endswith("/refs/tags/v0.4.0.zip")
+    assert motor._adressen("v0.4.0", "c" * 40)["paket"].endswith("/archive/" + "c" * 40 + ".zip")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Linux-Autostart")
@@ -191,13 +190,18 @@ def test_selbstupdate_abfragen_und_laden(monkeypatch):
 
     from taleward_worker import VERSION, selbstupdate
 
+    from tests.freigabe_hilfe import freigabe
+
     inhalt = b"MZ neue Fassung"
+    text, sig = freigabe("Tinkerworkss/taleward-worker", "worker-v9.9.9", {"TalewardWorker-Setup.exe": inhalt})
 
     def antwort(req):
         if req.url.path == "/worker/v1/app-update":
             assert req.headers["Authorization"] == "Bearer t" and req.url.params["system"] in ("windows", "linux")
-            return httpx.Response(200, json={"version": "9.9.9", "url": "https://srv/downloads/x.exe",
-                                             "sha256": hashlib.sha256(inhalt).hexdigest(), "notes": "Neu"})
+            return httpx.Response(200, json={
+                "version": "9.9.9", "url": "https://srv/downloads/worker-windows/9.9.9/TalewardWorker-Setup.exe",
+                "sha256": hashlib.sha256(inhalt).hexdigest(), "notes": "Neu", "freigabe": text.decode(),
+                "freigabeSignatur": sig})
         return httpx.Response(200, content=inhalt)
 
     transport = httpx.MockTransport(antwort)
@@ -214,7 +218,9 @@ def test_selbstupdate_abfragen_und_laden(monkeypatch):
     u = selbstupdate.Aktualisierung(angebot, "https://srv", "t")
     datei = u._laden()
     assert datei.read_bytes() == inhalt and u.anteil > 0
-    u2 = selbstupdate.Aktualisierung({**angebot, "sha256": "0" * 64}, "https://srv", "t")
+    falsch, falsch_sig = freigabe("Tinkerworkss/taleward-worker", "worker-v9.9.9", {"TalewardWorker-Setup.exe": b"x"})
+    u2 = selbstupdate.Aktualisierung({**angebot, "freigabe": falsch.decode(), "freigabeSignatur": falsch_sig},
+                                     "https://srv", "t")
     with pytest.raises(RuntimeError, match="Prüfsumme"):
         u2._laden()
     assert not list((pfade.basis() / "updates").glob("*.exe"))

@@ -1,14 +1,21 @@
 """Die Worker-App aktualisiert sich selbst – die Fassung und die Datei kommen vom eigenen Taleward-Server.
 
-- Windows: Installer vom Server laden (/downloads/…), SHA-256 prüfen, still installieren (/VERYSILENT). Der
-  Installer startet die App danach selbst wieder (--hintergrund). Keine Administratorrechte nötig.
-- Linux (Installation über install-linux.sh / uv tool): „uv tool install“ mit dem Tag der Fassung, dann Neustart.
+Installiert wird nur eine freigegebene Fassung: Der Server reicht die Freigabe (freigabe.txt samt Unterschrift) nur
+durch, geprüft wird sie hier mit dem fest eingebauten Schlüssel (taleward_worker/freigabe.py). Repo und Prüfsumme
+kommen aus der Freigabe, nicht vom Server.
+
+- Windows: Installer vom eigenen Server laden (nur Pfad /downloads/worker-windows/…, immer an die gekoppelte Adresse),
+  SHA-256 aus der Freigabe prüfen, still installieren (/VERYSILENT). Der Installer startet die App danach selbst wieder
+  (--hintergrund). Keine Administratorrechte nötig.
+- Linux (Installation über install-linux.sh / uv tool): „uv tool install“ mit genau dem freigegebenen Commit, dann
+  Neustart.
 Installiert wird nur, wenn der Worker gerade nichts verarbeitet.
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +24,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from taleward_worker import VERSION, pfade
+from taleward_worker import APP_REPO, VERSION, freigabe, pfade
 
 
 def neuer(a: str | None, b: str | None) -> bool:
@@ -106,10 +113,33 @@ class Aktualisierung:
         except Exception as e:  # noqa: BLE001 – Fehler anzeigen, alte Fassung läuft weiter
             self.phase, self.fehler = "fehler", f"{type(e).__name__}: {e}"[:300]
 
+    def _freigabe(self) -> freigabe.Freigabe:
+        """Freigabe der angebotenen Fassung prüfen (vom Server durchgereicht, sonst direkt von GitHub)."""
+        version = str(self.angebot.get("version") or "")
+        if not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", version):
+            raise RuntimeError("Unbekannte Fassung – Update verworfen.")
+        tag = f"worker-v{version}"
+        text, sig = self.angebot.get("freigabe"), self.angebot.get("freigabeSignatur")
+        try:
+            if text and sig:
+                return freigabe.lesen(text.encode("utf-8"), sig, APP_REPO, tag)
+            return freigabe.von_github(APP_REPO, tag, user_agent=f"TalewardWorker/{VERSION}")
+        except freigabe.FreigabeFehler as e:
+            raise RuntimeError(f"Keine gültige Freigabe ({e}) – Update verworfen.") from None
+
+    def _adresse(self) -> str:
+        """Download nur vom gekoppelten Server: vom Angebot zählt nur der Pfad unter /downloads/worker-windows/."""
+        pfad = httpx.URL(str(self.angebot.get("url") or "")).path
+        if not re.fullmatch(r"/downloads/worker-windows/[0-9.]+/[A-Za-z0-9._-]+", pfad):
+            raise RuntimeError("Der Server nennt keine gültige Datei.")
+        return self.server.rstrip("/") + pfad
+
     def _laden(self):
-        url, soll = self.angebot.get("url"), (self.angebot.get("sha256") or "").lower()
-        if not url or not soll:
-            raise RuntimeError("Der Server nennt keine Datei oder Prüfsumme.")
+        f = self._freigabe()
+        soll = f.dateien.get("TalewardWorker-Setup.exe")
+        if not soll:
+            raise RuntimeError("Der Installer ist nicht freigegeben – Update verworfen.")
+        url = self._adresse()
         ordner = pfade.basis() / "updates"
         shutil.rmtree(ordner, ignore_errors=True)
         ordner.mkdir(parents=True)
@@ -121,26 +151,22 @@ class Aktualisierung:
             r.raise_for_status()
             gesamt = int(r.headers.get("content-length") or self.angebot.get("sizeBytes") or 0)
             geladen = 0
-            with ziel.open("wb") as f:
+            with ziel.open("wb") as datei:
                 for block in r.iter_bytes(1024 * 256):
                     h.update(block)
-                    f.write(block)
+                    datei.write(block)
                     geladen += len(block)
                     if gesamt:
                         self.anteil = min(0.99, geladen / gesamt)
         if h.hexdigest() != soll:
             ziel.unlink(missing_ok=True)
-            raise RuntimeError("Prüfsumme stimmt nicht – Update verworfen.")
+            raise RuntimeError("Prüfsumme stimmt nicht mit der Freigabe überein – Update verworfen.")
         return ziel
 
     def _linux(self) -> None:
-        repo, tag = self.angebot.get("repo"), self.angebot.get("tag")
-        if not repo or not tag:
-            raise RuntimeError("Der Server nennt keine Quelle für Linux.")
+        f = self._freigabe()  # Repo fest, Commit aus der Freigabe – Angaben des Servers zu Repo/Tag zählen nicht
         uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
-        # Bis 0.4.3 lag die App im Server-Repository (Ordner worker-app/), seitdem in einem eigenen
-        unterordner = "#subdirectory=worker-app" if repo.endswith("/taleward-server") else ""
-        quelle = f"taleward-worker[qt] @ https://github.com/{repo}/archive/refs/tags/{tag}.zip{unterordner}"
+        quelle = f"taleward-worker[qt] @ https://github.com/{APP_REPO}/archive/{f.commit}.zip"
         erg = subprocess.run([uv, "tool", "install", "--force", "--python", "3.12", quelle],
                              capture_output=True, text=True, timeout=1800)
         if erg.returncode != 0:

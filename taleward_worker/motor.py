@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from pathlib import Path
 
 import httpx
 
-from taleward_worker import REPO, VERSION, pfade, prozesse
+from taleward_worker import REPO, VERSION, freigabe, pfade, prozesse
 
 # Ungefähre Downloadgröße (für die Fortschrittsanzeige; gemessen an der Größe des Zwischenspeichers)
 # Größe des installierten KI-Pakets in MB (gemessen: Windows mit CUDA 7,7 GB, Stand 0.4.4). Der Fortschritt zählt,
@@ -68,28 +69,30 @@ def _netzcode(e: httpx.HTTPError) -> str:
 
 
 def quelle(fassung: str) -> dict:
-    """Download-Adressen für eine Serverfassung. Gibt es kein passendes Git-Tag (v0.4.0), gilt der main-Zweig."""
+    """Download-Adressen für eine Serverfassung – nur, wenn sie freigegeben (unterschrieben) ist.
+
+    Die Fassung nennt der Server; geladen wird genau der Commit aus der Freigabe des Tags v<Fassung>
+    (taleward_worker/freigabe.py). Ohne Freigabe kein Rückfall auf main, sondern ein Fehler."""
     eigen = os.environ.get("TALEWARD_MOTOR_QUELLE")  # Entwicklung: lokaler Ordner des Server-Codes
     if eigen:
         return {"ref": "lokal", "genau": True, "paket": eigen,
                 "anforderungen": str(Path(eigen) / "engine-requirements.txt")}
-    kandidaten = [f"v{fassung}", fassung] if fassung and fassung != "0.0.0" else []
-    with httpx.Client(timeout=20, follow_redirects=True, headers={"User-Agent": f"TalewardWorker/{VERSION}"}) as k:
-        for ref in kandidaten:
-            try:
-                r = k.head(f"https://raw.githubusercontent.com/{REPO}/{ref}/engine-requirements.txt")
-            except httpx.HTTPError as e:
-                raise MotorFehler(_netzcode(e)) from None
-            if r.status_code == 200:
-                return _adressen(ref, genau=True)
-    return _adressen("main", genau=False)
+    if not re.fullmatch(r"\d{1,4}\.\d{1,4}\.\d{1,4}", fassung or ""):
+        raise MotorFehler("nicht_freigegeben", f"Unbekannte Serverfassung: {fassung!r}"[:200])
+    tag = f"v{fassung}"
+    try:
+        f = freigabe.von_github(REPO, tag, user_agent=f"TalewardWorker/{VERSION}")
+    except httpx.HTTPError as e:
+        raise MotorFehler(_netzcode(e)) from None
+    except freigabe.FreigabeFehler as e:
+        raise MotorFehler("nicht_freigegeben", str(e)) from None
+    return _adressen(tag, f.commit)
 
 
-def _adressen(ref: str, genau: bool) -> dict:
-    art = "tags" if ref != "main" else "heads"
-    return {"ref": ref, "genau": genau,
-            "paket": f"https://github.com/{REPO}/archive/refs/{art}/{ref}.zip",
-            "anforderungen": f"https://raw.githubusercontent.com/{REPO}/{ref}/engine-requirements.txt"}
+def _adressen(tag: str, commit: str) -> dict:
+    return {"ref": tag, "genau": True, "commit": commit,
+            "paket": f"https://github.com/{REPO}/archive/{commit}.zip",
+            "anforderungen": f"https://raw.githubusercontent.com/{REPO}/{commit}/engine-requirements.txt"}
 
 
 @dataclass
@@ -187,7 +190,8 @@ class Installation:
 
     def _installieren(self) -> None:
         q = quelle(self.fassung)
-        self.zeilen.append(f"Fassung {self.fassung} → {q['ref']}" + ("" if q["genau"] else " (kein Tag, main)"))
+        self.zeilen.append(f"Fassung {self.fassung} → {q['ref']}" + (f" ({q['commit'][:12]}, freigegeben)"
+                                                                    if q.get("commit") else ""))
         if not self.testmodus:
             art, pakete = self._aenderung(q)
             if art == "gleich":
